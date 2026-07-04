@@ -1,0 +1,4 @@
+-refactor prompts.py into subagents.py and maybe prompts.py
+-refactor CLAUDE.md discovery and change to <COOL_NAME>.md
+-implement basic tools
+-test with real LLM
