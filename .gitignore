@@ -8,6 +8,8 @@ __pycache__/
 # C extensions
 *.so
 
+.agent/transcripts/*
+
 # Distribution / packaging
 .Python
 build/
