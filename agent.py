@@ -10,8 +10,8 @@ from typedefs import TextMessageContent, ToolResultMessageContent, UserMessage, 
 from mock_adapter import acompletion
 from transcript import Transcript
 from hooks import HookManager, initial_setup_hook
-from tools import create_core_registry, ToolRegistry
-
+from tools.registry import ToolRegistry
+from tools.core import create_core_registry
 
 async def handle_bash(callback: BashCallback) -> tuple[str, bool]:
     """Executes a bash command natively and captures stdout/stderr."""
@@ -34,7 +34,7 @@ async def handle_bash(callback: BashCallback) -> tuple[str, bool]:
     return output.strip() or "Command completed with no output.", is_error
 
 
-async def handle_subagent(callback: AgentCallback, parent_registry: ToolRegistry, hooks: HookManager, parent_transcript_path: Path) -> tuple[str, bool]:
+async def handle_subagent(callback: AgentCallback, parent_registry: ToolRegistry, hooks: HookManager, parent_transcript_path: Path) -> tuple[list[TextMessageContent], bool]:
     """Spins up a recursive sub-agent loop."""
     print(f"  >> [Sub-Agent '{callback.subagent_type}' started] Task: {callback.callback_description}")
     
@@ -57,16 +57,16 @@ async def handle_subagent(callback: AgentCallback, parent_registry: ToolRegistry
     sub_registry = parent_registry
     if callback.tools is not None:
         sub_registry = parent_registry.clone_filtered(callback.tools)
-    
-    await run_agentic_loop(sub_transcript, sub_registry, hooks)
+
+    # --- Capture the pristine list of blocks ---
+    final_blocks = await run_agentic_loop(sub_transcript, sub_registry, hooks)
     
     print(f"  >> [Sub-Agent '{callback.subagent_type}' finished]")
-    return "Sub-agent completed its task. See its final output in the transcript.", False
+    return final_blocks, False
 
-async def run_agentic_loop(transcript: Transcript, registry: ToolRegistry, hooks: HookManager):
+async def run_agentic_loop(transcript: Transcript, registry: ToolRegistry, hooks: HookManager) -> list[TextMessageContent]:
     """
-    The core driver. Repeatedly calls the LLM. If the LLM uses a tool, it executes it,
-    appends the result, and loops again. Stops when the LLM replies with pure text.
+    Returns the pristine list of text blocks from the LLM when no more tools are requested.
     """
     while True:
         schemas = registry.get_all_schemas()
@@ -79,38 +79,38 @@ async def run_agentic_loop(transcript: Transcript, registry: ToolRegistry, hooks
         for text_block in texts:
             print(f"< {text_block.text}")
 
+        # --- THE FIX: Return the actual blocks ---
         if not tool_uses:
-            break
+            return texts
 
         tool_results_content = []
         for tu in tool_uses:
             print(f"  >> Calling {tu.name}(...)")
             
-            # --- Pre-Tool Hook ---
             pre_event = await hooks.trigger_pre_tool(tu.name, tu.input)
             if pre_event.decision == "deny":
                 print(f"  >> [BLOCKED by Hook]: {pre_event.deny_reason}")
-                result_str, is_error = f"Tool blocked: {pre_event.deny_reason}", True
+                result_output, is_error = f"Tool blocked: {pre_event.deny_reason}", True
             else:
-                # --- Invoke Native Tool ---
                 raw_result = await registry.invoke(tu.name, tu.input)
                 is_error = False
 
+                # Handle the different return types natively
                 if isinstance(raw_result, BashCallback):
-                    result_str, is_error = await handle_bash(raw_result)
+                    result_output, is_error = await handle_bash(raw_result)
                 elif isinstance(raw_result, AgentCallback):
-                    # We now pass the current transcript's file path down to the sub-agent handler
-                    result_str, is_error = await handle_subagent(raw_result, registry, hooks, transcript.file_path)
+                    result_output, is_error = await handle_subagent(raw_result, registry, hooks, transcript.file_path)
                 else:
-                    result_str = str(raw_result)
-                    if result_str.startswith("Error:"):
+                    # Catch raw strings or errors
+                    result_output = raw_result
+                    if isinstance(result_output, str) and result_output.startswith("Error:"):
                         is_error = True
 
-            # --- Post-Tool Hook ---
-            post_event = await hooks.trigger_post_tool(tu.name, tu.input, result_str)
+            # Trigger the post-tool hook (it now accepts str | list[TextMessageContent])
+            post_event = await hooks.trigger_post_tool(tu.name, tu.input, result_output)
             
             tool_results_content.append(ToolResultMessageContent(
-                tool_use_id=tu.id,
+                tool_use_id=tu.id,                
                 content=post_event.tool_output,
                 is_error=is_error
             ))

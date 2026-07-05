@@ -19,7 +19,7 @@ class ToolUseMessageContent(pydantic.BaseModel):
 class ToolResultMessageContent(pydantic.BaseModel):
     type: Literal["tool_result"] = "tool_result"
     tool_use_id: str
-    content: str
+    content: str | list[TextMessageContent]
     is_error: bool = False
 
 # ---------------------------------------------------------

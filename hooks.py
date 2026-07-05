@@ -26,7 +26,7 @@ class PreToolUseEvent(pydantic.BaseModel):
 class PostToolUseEvent(pydantic.BaseModel):
     tool_name: str
     tool_input: dict
-    tool_output: str
+    tool_output: str | list[TextMessageContent]
     additional_context: list[TextMessageContent] = []
 
 # Type aliases for Async Hook Callbacks
