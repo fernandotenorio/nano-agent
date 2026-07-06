@@ -49,6 +49,8 @@ class BashCallback(pydantic.BaseModel):
     """Returned by the Bash tool to instruct the loop to run a subprocess."""
     kind: Literal["bash_callback"] = "bash_callback"
     command: str
+    callback_description: str | None = None
+    timeout: float = 120.0  # seconds
 
 class AgentCallback(pydantic.BaseModel):
     kind: Literal["agent_callback"] = "agent_callback"

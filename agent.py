@@ -6,6 +6,7 @@ from pathlib import Path
 from datetime import datetime
 
 from prompts import get_system_prompt
+from typing import Literal
 from typedefs import TextMessageContent, ToolResultMessageContent, ToolUseMessageContent, UserMessage, SystemMessage, BashCallback, AgentCallback
 from mock_adapter import acompletion
 from transcript import Transcript
@@ -14,24 +15,59 @@ from tools.registry import ToolRegistry
 from tools.core import create_core_registry
 
 async def handle_bash(callback: BashCallback) -> tuple[str, bool]:
-    """Executes a bash command natively and captures stdout/stderr."""
+    """
+    Executes a bash command natively with timeouts and streaming partial output.
+    Returns (output_text, is_error).
+    """
+    MAX_OUTPUT = 30000
     print(f"  $ {callback.command}")
+    
     process = await asyncio.create_subprocess_shell(
         callback.command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
-    stdout, stderr = await process.communicate()
+
+    # Concurrently read stdout and stderr up to MAX_OUTPUT bytes
+    assert process.stdout is not None and process.stderr is not None
+    stdout_parts: list[bytes] = []
+    stderr_parts: list[bytes] = []
     
-    exit_code = process.returncode
-    output = ""
-    if stdout:
-        output += stdout.decode('utf-8', errors='replace')
-    if stderr:
-        output += "\n" + stderr.decode('utf-8', errors='replace')
+    async def read_stream(stream: asyncio.StreamReader, parts: list[bytes]) -> str:
+        while (chunk := await stream.read(8192)) and sum(len(part) for part in parts) < MAX_OUTPUT:
+            parts.append(chunk)                
+        return b''.join(parts).decode('utf-8', errors='replace')[:MAX_OUTPUT]
+
+    stdout_task = asyncio.create_task(read_stream(process.stdout, stdout_parts))
+    stderr_task = asyncio.create_task(read_stream(process.stderr, stderr_parts))
+
+    # Wait for completion or timeout
+    exit_code: int | Literal["timeout"]
+    try:
+        exit_code = await asyncio.wait_for(process.wait(), callback.timeout)
+    except asyncio.TimeoutError:
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+        exit_code = "timeout"
+    
+    stdout, stderr = await asyncio.gather(stdout_task, stderr_task)
+    
+    # Format the result just like mini_agent
+    if exit_code == "timeout":
+        is_error = True
+        text = f"Command timed out after {callback.timeout:0.1f}s\n{stderr}\n{stdout}"
+    elif exit_code == 0:
+        is_error = False
+        text = f"{stdout}\n{stderr}"
+    else:
+        is_error = True
+        text = f"{stderr}\n{stdout}"
         
-    is_error = exit_code != 0
-    return output.strip() or "Command completed with no output.", is_error
+    return text.strip() or "Command completed with no output.", is_error
 
 
 async def handle_subagent(callback: AgentCallback, parent_registry: ToolRegistry, hooks: HookManager, parent_transcript_path: Path) -> tuple[list[TextMessageContent], bool]:
