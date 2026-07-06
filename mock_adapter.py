@@ -45,11 +45,11 @@ async def acompletion(model: str, tools: list[dict[str, Any]], messages: list[Me
     call_id = f"call_{uuid.uuid4().hex[:8]}"
     
     # 4. Heuristics for triggering tools
-    if last_user_text.startswith("bash "):
+    if last_user_text.startswith("shell "):
         command = last_user_text[5:].strip()
         return AssistantMessage(content=[
-            TextMessageContent(text="I will run that bash command for you."),
-            ToolUseMessageContent(id=call_id, name="Bash", input={"command": command})
+            TextMessageContent(text="I will run that shell command for you."),
+            ToolUseMessageContent(id=call_id, name="Shell", input={"command": command})
         ])
         
     elif last_user_text.startswith("read "):

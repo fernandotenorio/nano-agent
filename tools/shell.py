@@ -1,5 +1,5 @@
 from tools.registry import ToolRegistry, ToolReturnType
-from typedefs import BashCallback
+from typedefs import ShellCallback
 from typing import Any
 from textwrap import dedent
 
@@ -13,18 +13,19 @@ async def _bash_impl(kwargs: dict[str, Any]) -> ToolReturnType:
     # mini_agent uses timeout in ms (default 120000 ms = 120s)
     timeout_ms = kwargs.get("timeout", 120000)
     
-    return BashCallback(
+    return ShellCallback(
         command=command,
         callback_description=description,
         timeout=timeout_ms / 1000.0
     )
 
 
-def register_bash_tools(registry: ToolRegistry):
+def register_shell_tools(registry: ToolRegistry):
     registry.register(
-        name="Bash",
+        name="Shell",
         description=dedent("""\
-            This tool runs a bash command.
+            Executes a command in the system's default shell (bash on Unix, cmd.exe on Windows).
+            - Use commands appropriate for the current OS (revealed in the system prompt).
             
             Where it is good to use a bash command:
             - To invoke the project's build/typecheck/test tools
@@ -35,10 +36,10 @@ def register_bash_tools(registry: ToolRegistry):
             - To run a helper script that you've written
             
             BE CAREFUL! THERE ARE MANY DANGEROUS BASH COMMANDS.
-            - Be very careful about any "rm" command. Only do these with the user's explicit instruction.
+            - Be very careful about any "rm" or "del" command. Only do these with the user's explicit instruction.
             - Be careful to quote arguments properly.
-            - Do not use bash commands where tools like Grep, Glob, LS already exist.
-            - You can use `;` and `&&` for multiple commands.
+            - Do not use shell commands if you have an equivalent tool at your disposal.
+            - You can chain multiple commands.
             - Any directory-changes with `cd` are ephemeral. It's best not to change directory at all.
             """),
         input_schema={

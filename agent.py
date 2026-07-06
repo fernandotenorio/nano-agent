@@ -7,16 +7,16 @@ from datetime import datetime
 
 from prompts import get_system_prompt
 from typing import Literal
-from typedefs import TextMessageContent, ToolResultMessageContent, ToolUseMessageContent, UserMessage, SystemMessage, BashCallback, AgentCallback
+from typedefs import TextMessageContent, ToolResultMessageContent, ToolUseMessageContent, UserMessage, SystemMessage, ShellCallback, AgentCallback
 from mock_adapter import acompletion
 from transcript import Transcript
 from hooks import HookManager, initial_setup_hook
 from tools.registry import ToolRegistry
 from tools.core import create_core_registry
 
-async def handle_bash(callback: BashCallback) -> tuple[str, bool]:
+async def handle_shell(callback: ShellCallback) -> tuple[str, bool]:
     """
-    Executes a bash command natively with timeouts and streaming partial output.
+    Executes a shell command natively with timeouts and streaming partial output.
     Returns (output_text, is_error).
     """
     MAX_OUTPUT = 30000
@@ -128,8 +128,8 @@ async def execute_tool(
         raw_result = await registry.invoke(tu.name, tu.input)
         
         # Route Native Callbacks
-        if isinstance(raw_result, BashCallback):
-            result_output, is_error = await handle_bash(raw_result)
+        if isinstance(raw_result, ShellCallback):
+            result_output, is_error = await handle_shell(raw_result)
         elif isinstance(raw_result, AgentCallback):
             result_output, is_error = await handle_subagent(raw_result, registry, hooks, transcript_path)
         else:
