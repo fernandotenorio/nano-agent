@@ -71,7 +71,7 @@ class HookManager:
                 break
         return event
 
-    async def trigger_post_tool(self, name: str, inputs: dict, output: str) -> PostToolUseEvent:
+    async def trigger_post_tool(self, name: str, inputs: dict, output: str | list[TextMessageContent]) -> PostToolUseEvent:
         event = PostToolUseEvent(tool_name=name, tool_input=inputs, tool_output=output)
         for hook in self._post_tool_hooks:
             event = await hook(event)
