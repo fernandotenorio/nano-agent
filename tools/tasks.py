@@ -3,7 +3,7 @@ import pydantic
 from environment import get_environment_details
 from textwrap import dedent
 from tools.registry import ToolRegistry, ToolReturnType
-from typedefs import AgentCallback
+from typedefs import AgentCallback, ToolFailure
 from typing import Any
 
 
@@ -42,13 +42,13 @@ async def _task_impl(kwargs: dict[str, Any]) -> ToolReturnType:
     subagent_type = kwargs.get("subagent_type", "default-agent")
     
     if not prompt:
-        return "Error: prompt is required."
+        return ToolFailure(error_message="Error: prompt is required.")
 
     # Find the requested profile
     profile = next((sa for sa in _SUB_AGENTS if sa.type == subagent_type), None)
     if not profile:
         available = ", ".join(sa.type for sa in _SUB_AGENTS)
-        return f"Error: subagent_type '{subagent_type}' not recognized. Available: {available}"
+        return ToolFailure(error_message=f"Error: subagent_type '{subagent_type}' not recognized. Available: {available}")
 
     # Prepare user content (including CLAUDE.md if it exists)
     # TODO: dedup CLAUDE.md injection

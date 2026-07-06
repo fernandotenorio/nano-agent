@@ -233,9 +233,11 @@ def register_fs_tools(registry: ToolRegistry):
     registry.register(
         name="Write",
         description=dedent("""\
-            Writes to disk.        
-            - You should always Read a file first before writing or editing it; you'll get an error if you try to write first.
-            - You shouldn't create new files unless explicitly instructed by the user."""),
+            Writes the provided content to a file.
+            This completely replaces any existing content in the file, or creates a new file if it does not exist yet.
+            - Use this tool ONLY when creating a brand new file from scratch, or when completely rewriting/replacing the entire content of an existing file.
+            - If the file already exists, you must 'Read' it first before overwriting it, otherwise you will get an error.
+            - Only create new files when they are logically required to fulfill the user's task or when explicitly requested."""),
         input_schema={
             "type": "object",
             "properties": {
@@ -256,11 +258,13 @@ def register_fs_tools(registry: ToolRegistry):
     registry.register(
         name="Edit",
         description=dedent("""\
-            Does string replacement in files.
-            - You MUST read the file before doing any edits.
+            Performs exact string replacements inside an existing file.
+            - Use this tool to modify, insert, replace, or delete specific blocks of code without disturbing the rest of the file.
+            - You must read the file before doing any edits.
             - This does exact string replacements. You have to get exact indentation right.
-            - Don't include line-numbers.
-            - You can use `replace_all` if `old_string` is found multiple times and you want to change them all."""),
+            - To replace all occurrences, you must set the 'replace_all' parameter to true.
+            - To replace only one specific occurrence, you must provide enough surrounding context to make the match unique.
+            - Don't include line-numbers."""),
         input_schema={
             "type": "object",
             "properties": {
