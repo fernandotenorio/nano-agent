@@ -22,6 +22,10 @@ class ToolResultMessageContent(pydantic.BaseModel):
     content: str | list[TextMessageContent]
     is_error: bool = False
 
+class ToolFailure(pydantic.BaseModel):
+    """Returned by a tool to explicitly signal an error state to the agent loop."""
+    error_message: str
+
 # ---------------------------------------------------------
 # Messages
 # ---------------------------------------------------------

@@ -7,7 +7,10 @@ from datetime import datetime
 
 from prompts import get_system_prompt
 from typing import Literal
-from typedefs import TextMessageContent, ToolResultMessageContent, ToolUseMessageContent, UserMessage, SystemMessage, ShellCallback, AgentCallback
+from typedefs import (
+    TextMessageContent, ToolResultMessageContent, ToolUseMessageContent,
+    ToolFailure, UserMessage, SystemMessage, ShellCallback, AgentCallback
+)
 from mock_adapter import acompletion
 from transcript import Transcript
 from hooks import HookManager, initial_setup_hook
@@ -132,14 +135,14 @@ async def execute_tool(
             result_output, is_error = await handle_shell(raw_result)
         elif isinstance(raw_result, AgentCallback):
             result_output, is_error = await handle_subagent(raw_result, registry, hooks, transcript_path)
+        elif isinstance(raw_result, ToolFailure):
+            # EXPLICIT FAILURE
+            result_output = raw_result.error_message
+            is_error = True
         else:
             # Standard tool output
             result_output = raw_result
-            is_error = False
-            # Fallback heuristic: if a tool returns a string starting with "Error:"
-            if isinstance(result_output, str) and result_output.startswith("Error:"):
-                is_error = True
-                
+            is_error = False                
     except Exception as e:
         # Catch Python exceptions (FileNotFound, JSON decoding, missing keys, etc.)
         result_output = f"Error during tool execution: {str(e)}"

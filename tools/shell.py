@@ -1,5 +1,5 @@
 from tools.registry import ToolRegistry, ToolReturnType
-from typedefs import ShellCallback
+from typedefs import ShellCallback, ToolFailure
 from typing import Any
 from textwrap import dedent
 
@@ -7,7 +7,7 @@ async def _bash_impl(kwargs: dict[str, Any]) -> ToolReturnType:
     """Instructs the loop to run a bash command."""
     command = kwargs.get("command")
     if not command:
-        return "Error: command is required."
+        return ToolFailure(error_message="Error: command is required.")
     
     description = kwargs.get("description")
     # mini_agent uses timeout in ms (default 120000 ms = 120s)
