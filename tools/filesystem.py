@@ -75,6 +75,46 @@ async def _read_impl(kwargs: dict[str, Any]) -> ToolReturnType:
     return text
 
 
+async def _write_impl(kwargs: dict[str, Any]) -> ToolReturnType:
+    """Writes content to a file, enforcing read-before-write for existing files."""
+    file_path_str = kwargs.get("file_path")
+    content = kwargs.get("content")
+
+    if not file_path_str:
+        return "Error: file_path is required."
+    if content is None:  # We allow empty strings, but the key must exist
+        return "Error: content is required."
+
+    file_path = Path(file_path_str).resolve()
+    exists = file_path.exists()
+
+    # Enforce Read-before-Write for existing files
+    if exists and (file_path not in known_content_files or file_path in stale_content_files):
+        return dedent("""\
+            Error: File has not been read yet.
+            Read it first before writing to it.""")
+    
+    try:
+        file_path.write_text(content, encoding="utf-8")
+    except Exception as e:
+        return f"Error writing to file: {str(e)}"
+
+    # Update state trackers
+    known_content_files[file_path] = content.splitlines()
+    stale_content_files.discard(file_path)
+
+    # Format the response back to the LLM
+    if exists:
+        text = dedent(f"""\
+            The file {file_path} has been updated.
+            Here's the result of running `cat -n` on a snippet of the edited file:
+            {format_lines(content.splitlines())}""")
+    else:
+        text = f"File created successfully at: {file_path}"
+
+    return text
+
+
 def register_fs_tools(registry: ToolRegistry):
     registry.register(
         name="Read",
@@ -102,4 +142,27 @@ def register_fs_tools(registry: ToolRegistry):
             "required": ["file_path"]
         },
         func=_read_impl
+    )
+
+    registry.register(
+        name="Write",
+        description=dedent("""\
+            Writes to disk.        
+            - You should always Read a file first before writing or editing it; you'll get an error if you try to write first.
+            - You shouldn't create new files unless explicitly instructed by the user."""),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "content": {
+                    "description": "New file contents",
+                    "type": "string"
+                },
+                "file_path": {
+                    "description": "Absolute path to the file",
+                    "type": "string"
+                }
+            },
+            "required": ["file_path", "content"]
+        },
+        func=_write_impl
     )

@@ -58,7 +58,13 @@ async def acompletion(model: str, tools: list[dict[str, Any]], messages: list[Me
             TextMessageContent(text=f"Let me read the contents of {file_path}."),
             ToolUseMessageContent(id=call_id, name="Read", input={"file_path": file_path})
         ])
-        
+    elif last_user_text.startswith("write "):
+        file_path = last_user_text[6:].strip()
+        content = "Some random text."
+        return AssistantMessage(content=[
+            TextMessageContent(text=f"Writing to {file_path}."),
+            ToolUseMessageContent(id=call_id, name="Write", input={"file_path": file_path, "content": content})
+        ])
     elif last_user_text.startswith("task "):
         task_prompt = last_user_text[5:].strip()
         return AssistantMessage(content=[
