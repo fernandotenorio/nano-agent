@@ -42,4 +42,4 @@ class ToolRegistry:
             # Execute the native python function
             return await self._callables[name](kwargs)
         except Exception as e:
-            return f"Error executing tool '{name}': {str(e)}"
+            return f"Error: tool '{name}': {str(e)}"
