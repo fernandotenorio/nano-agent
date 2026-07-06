@@ -6,7 +6,7 @@ from pathlib import Path
 from datetime import datetime
 
 from prompts import get_system_prompt
-from typedefs import TextMessageContent, ToolResultMessageContent, UserMessage, SystemMessage, BashCallback, AgentCallback
+from typedefs import TextMessageContent, ToolResultMessageContent, ToolUseMessageContent, UserMessage, SystemMessage, BashCallback, AgentCallback
 from mock_adapter import acompletion
 from transcript import Transcript
 from hooks import HookManager, initial_setup_hook
@@ -64,6 +64,71 @@ async def handle_subagent(callback: AgentCallback, parent_registry: ToolRegistry
     print(f"  >> [Sub-Agent '{callback.subagent_type}' finished]")
     return final_blocks, False
 
+
+async def execute_tool(
+    tu: ToolUseMessageContent, 
+    registry: ToolRegistry, 
+    hooks: HookManager, 
+    transcript_path: Path
+) -> list[TextMessageContent | ToolResultMessageContent]:
+    """
+    Invokes a tool, handles pre/post hooks, and catches execution exceptions.
+    Modeled after mini_agent's invoke_tool.
+    """
+    print(f"  >> Calling {tu.name}(...)")
+    
+    # 1. Pre-Hook
+    pre_event = await hooks.trigger_pre_tool(tu.name, tu.input)
+    if pre_event.decision == "deny":
+        print(f"  >> [BLOCKED by Hook]: {pre_event.deny_reason}")
+        return [ToolResultMessageContent(
+            tool_use_id=tu.id,
+            content=f"Tool blocked: {pre_event.deny_reason}",
+            is_error=True
+        )]
+
+    # 2. Invoke Tool with Error Boundaries
+    try:
+        raw_result = await registry.invoke(tu.name, tu.input)
+        
+        # Route Native Callbacks
+        if isinstance(raw_result, BashCallback):
+            result_output, is_error = await handle_bash(raw_result)
+        elif isinstance(raw_result, AgentCallback):
+            result_output, is_error = await handle_subagent(raw_result, registry, hooks, transcript_path)
+        else:
+            # Standard tool output
+            result_output = raw_result
+            is_error = False
+            # Fallback heuristic: if a tool returns a string starting with "Error:"
+            if isinstance(result_output, str) and result_output.startswith("Error:"):
+                is_error = True
+                
+    except Exception as e:
+        # Catch Python exceptions (FileNotFound, JSON decoding, missing keys, etc.)
+        result_output = f"Error during tool execution: {str(e)}"
+        is_error = True
+
+    # 3. Format Base Result
+    content: list[TextMessageContent | ToolResultMessageContent] = [
+        ToolResultMessageContent(
+            tool_use_id=tu.id,                
+            content=result_output,
+            is_error=is_error
+        )
+    ]
+
+    # 4. Post-Hook (Only on success!)
+    if not is_error:
+        post_event = await hooks.trigger_post_tool(tu.name, tu.input, result_output)
+        
+        # If the post-hook adds extra context (e.g. file watchers, reminders, or block warnings),
+        # they are appended as TextMessageContent next to the ToolResultMessageContent.
+        if post_event.additional_context:
+            content.extend(post_event.additional_context)
+
+    return content
+
 async def run_agentic_loop(transcript: Transcript, registry: ToolRegistry, hooks: HookManager) -> list[TextMessageContent]:
     """
     Returns the pristine list of text blocks from the LLM when no more tools are requested.
@@ -79,45 +144,17 @@ async def run_agentic_loop(transcript: Transcript, registry: ToolRegistry, hooks
         for text_block in texts:
             print(f"< {text_block.text}")
 
-        # --- THE FIX: Return the actual blocks ---
+        # If LLM doesn't want to use any more tools, break the loop and return texts
         if not tool_uses:
             return texts
 
+        # Execute all tools requested by the LLM
         tool_results_content = []
         for tu in tool_uses:
-            print(f"  >> Calling {tu.name}(...)")
-            
-            pre_event = await hooks.trigger_pre_tool(tu.name, tu.input)
-            if pre_event.decision == "deny":
-                print(f"  >> [BLOCKED by Hook]: {pre_event.deny_reason}")
-                result_output, is_error = f"Tool blocked: {pre_event.deny_reason}", True
-            else:
-                raw_result = await registry.invoke(tu.name, tu.input)
-                is_error = False
-
-                # Handle the different return types natively
-                if isinstance(raw_result, BashCallback):
-                    result_output, is_error = await handle_bash(raw_result)
-                elif isinstance(raw_result, AgentCallback):
-                    result_output, is_error = await handle_subagent(raw_result, registry, hooks, transcript.file_path)
-                else:
-                    # Catch raw strings or errors
-                    result_output = raw_result
-                    if isinstance(result_output, str) and result_output.startswith("Error:"):
-                        is_error = True
-
-            # Trigger the post-tool hook (it now accepts str | list[TextMessageContent])
-            post_event = await hooks.trigger_post_tool(tu.name, tu.input, result_output)
-            
-            tool_results_content.append(ToolResultMessageContent(
-                tool_use_id=tu.id,                
-                content=post_event.tool_output,
-                is_error=is_error
-            ))
-            tool_results_content.extend(post_event.additional_context)
+            result_blocks = await execute_tool(tu, registry, hooks, transcript.file_path)
+            tool_results_content.extend(result_blocks)
 
         transcript.append(UserMessage(content=tool_results_content))
-
 
 def get_transcript_path(resume_arg: str | None) -> Path:
     """Determines where to load/save the transcript file."""
