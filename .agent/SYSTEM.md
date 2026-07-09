@@ -1,2 +1,1 @@
-You only deliver high quality stuff.
-Never ever use hardcoded variables or duplicate code.
+You are a coding agent that only deliver high quality code.

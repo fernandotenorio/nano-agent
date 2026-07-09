@@ -1,5 +1,6 @@
 from __future__ import annotations
 import pydantic
+import uuid
 from typing import Literal, Any, Union
 
 # ---------------------------------------------------------
@@ -10,11 +11,16 @@ class TextMessageContent(pydantic.BaseModel):
     type: Literal["text"] = "text"
     text: str
 
+class ThinkingMessageContent(pydantic.BaseModel):
+    type: Literal["thinking"] = "thinking"
+    thinking: str
+    signature: str = ""
+
 class ToolUseMessageContent(pydantic.BaseModel):
     type: Literal["tool_use"] = "tool_use"
     id: str
     name: str
-    input: dict[str, Any]
+    input: Any
 
 class ToolResultMessageContent(pydantic.BaseModel):
     type: Literal["tool_result"] = "tool_result"
@@ -40,7 +46,14 @@ class UserMessage(pydantic.BaseModel):
 
 class AssistantMessage(pydantic.BaseModel):
     role: Literal["assistant"] = "assistant"
-    content: list[Union[TextMessageContent, ToolUseMessageContent]]
+    id: str = pydantic.Field(default_factory=lambda: f"msg_{uuid.uuid4().hex[:8]}")
+    content: list[Union[TextMessageContent, ThinkingMessageContent, ToolUseMessageContent]]
+    type: Literal["message"] = "message"
+    model: str | None = None
+    stop_reason: str | None = None
+    stop_sequence: str | None = None
+    usage: dict[str, Any] | None = None
+
 
 # A helpful alias for the Transcript
 Message = Union[SystemMessage, UserMessage, AssistantMessage]

@@ -101,10 +101,20 @@ def register_tasks_tools(registry: ToolRegistry):
         input_schema={
             "type": "object",
             "properties": {
-                "prompt": {"type": "string", "description": "Comprehensive instructions for the sub-agent."},
-                "subagent_type": {"type": "string", "description": "Type of sub-agent (default-agent)"}
+                "description": {
+                    "description": "A brief phrase describing the task",
+                    "type": "string"
+                },
+                "prompt": {
+                    "description": "The full comprehensive prompt that the agent will work from.",
+                    "type": "string"
+                },
+                "subagent_type": {
+                    "description": "One of the listed subagent_types",
+                    "type": "string"
+                }
             },
-            "required": ["prompt"]
+            "required": ["description", "prompt", "subagent_type"]
         },
         func=_task_impl
     )

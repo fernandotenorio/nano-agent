@@ -11,11 +11,14 @@ from typedefs import (
     TextMessageContent, ToolResultMessageContent, ToolUseMessageContent,
     ToolFailure, UserMessage, SystemMessage, ShellCallback, AgentCallback
 )
-from mock_adapter import acompletion
+from adapter import acompletion
 from transcript import Transcript
 from hooks import HookManager, initial_setup_hook
 from tools.registry import ToolRegistry
 from tools.core import create_core_registry
+
+from dotenv import load_dotenv
+load_dotenv(".env.development")
 
 async def handle_shell(callback: ShellCallback) -> tuple[str, bool]:
     """
@@ -73,7 +76,13 @@ async def handle_shell(callback: ShellCallback) -> tuple[str, bool]:
     return text.strip() or "Command completed with no output.", is_error
 
 
-async def handle_subagent(callback: AgentCallback, parent_registry: ToolRegistry, hooks: HookManager, parent_transcript_path: Path) -> tuple[list[TextMessageContent], bool]:
+async def handle_subagent(
+    callback: AgentCallback,
+    parent_registry: ToolRegistry,
+    hooks: HookManager,
+    parent_transcript_path: Path,
+    model: str
+) -> tuple[list[TextMessageContent], bool]:
     """Spins up a recursive sub-agent loop."""
     print(f"  >> [Sub-Agent '{callback.subagent_type}' started] Task: {callback.callback_description}")
     
@@ -98,7 +107,7 @@ async def handle_subagent(callback: AgentCallback, parent_registry: ToolRegistry
         sub_registry = parent_registry.clone_filtered(callback.tools)
 
     # --- Capture the pristine list of blocks ---
-    final_blocks = await run_agentic_loop(sub_transcript, sub_registry, hooks)
+    final_blocks = await run_agentic_loop(sub_transcript, sub_registry, hooks, model=model)
     
     print(f"  >> [Sub-Agent '{callback.subagent_type}' finished]")
     return final_blocks, False
@@ -108,7 +117,8 @@ async def execute_tool(
     tu: ToolUseMessageContent, 
     registry: ToolRegistry, 
     hooks: HookManager, 
-    transcript_path: Path
+    transcript_path: Path,
+    model: str
 ) -> list[TextMessageContent | ToolResultMessageContent]:
     """
     Invokes a tool, handles pre/post hooks, and catches execution exceptions.
@@ -134,7 +144,7 @@ async def execute_tool(
         if isinstance(raw_result, ShellCallback):
             result_output, is_error = await handle_shell(raw_result)
         elif isinstance(raw_result, AgentCallback):
-            result_output, is_error = await handle_subagent(raw_result, registry, hooks, transcript_path)
+            result_output, is_error = await handle_subagent(raw_result, registry, hooks, transcript_path, model=model)
         elif isinstance(raw_result, ToolFailure):
             # EXPLICIT FAILURE
             result_output = raw_result.error_message
@@ -168,13 +178,13 @@ async def execute_tool(
 
     return content
 
-async def run_agentic_loop(transcript: Transcript, registry: ToolRegistry, hooks: HookManager) -> list[TextMessageContent]:
+async def run_agentic_loop(transcript: Transcript, registry: ToolRegistry, hooks: HookManager, model: str) -> list[TextMessageContent]:
     """
     Returns the pristine list of text blocks from the LLM when no more tools are requested.
     """
     while True:
         schemas = registry.get_all_schemas()
-        response = await acompletion("mock-model", schemas, transcript.messages)
+        response = await acompletion(model, schemas, transcript.messages)
         transcript.append(response)
 
         texts = [c for c in response.content if getattr(c, "type", None) == "text"]
@@ -190,7 +200,7 @@ async def run_agentic_loop(transcript: Transcript, registry: ToolRegistry, hooks
         # Execute all tools requested by the LLM
         tool_results_content = []
         for tu in tool_uses:
-            result_blocks = await execute_tool(tu, registry, hooks, transcript.file_path)
+            result_blocks = await execute_tool(tu, registry, hooks, transcript.file_path, model=model)
             tool_results_content.extend(result_blocks)
 
         transcript.append(UserMessage(content=tool_results_content))
@@ -214,11 +224,18 @@ async def main():
     # Parse Command Line Arguments
     parser = argparse.ArgumentParser(description="Native Code Agent")
     parser.add_argument("--resume", type=str, help="Path to an existing .jsonl transcript to resume")
+    parser.add_argument(
+        "--model", 
+        type=str, 
+        default="ollama/gemma3:12b",
+        help="LLM model (e.g. anthropic/claude-3-5-sonnet-20241022, ollama/qwen2.5-coder:14b, gpt-4o)"
+    )
     args = parser.parse_args()
 
     # Determine transcript file path
     transcript_file = get_transcript_path(args.resume)
     print(f"[TRANSCRIPT: {transcript_file}]")
+    print(f"[MODEL: {args.model}]")
     
     # Initialize State
     registry = create_core_registry()
@@ -258,7 +275,7 @@ async def main():
             ]
             
             transcript.append(UserMessage(content=message_content))
-            await run_agentic_loop(transcript, registry, hooks)
+            await run_agentic_loop(transcript, registry, hooks, model=args.model)
             
         except (KeyboardInterrupt, EOFError):
             print("\nExiting...")

@@ -1,1 +1,0 @@
-This is a C++ game project. Study the code.
