@@ -6,6 +6,11 @@ from textwrap import dedent
 async def _bash_impl(kwargs: dict[str, Any]) -> ToolReturnType:
     """Instructs the loop to run a bash command."""
     command = kwargs.get("command")
+
+    # Clean whitespace and strip command before validation
+    if command is not None:
+        command = command.strip()
+        
     if not command:
         return ToolFailure(error_message="Error: command is required.")
     
