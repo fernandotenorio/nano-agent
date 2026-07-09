@@ -1,3 +1,20 @@
--refactor CLAUDE.md discovery and change to <COOL_NAME>.md
--implement basic tools
--test with real LLM
+-decide where to search for agents.md and system.md and implement loading these files.
+
+-review all builtin prompts (system and tools).
+
+-add flag option to either append or overwrite system prompt: claude-code seems to 
+use --system-prompt to override and --append-system-prompt to append.
+
+-refactor CLAUDE.md discovery and change it to agents.md.
+
+-add more/missing agent tests.
+
+-implement plan mode and remaining basic tools.
+
+-implement tool tests.
+
+-add some control over provider (besides --model flag), reasoning level, etc.
+
+-add support for headless mode (--p and --interactive parameters).
+
+-implement remaining tests.
