@@ -1,24 +1,29 @@
 import asyncio
+import os
 import sys
 import argparse
 import uuid
 from pathlib import Path
 from datetime import datetime
+import logging
 
-from prompts import get_system_prompt
+from config import AppConfig, load_app_config
+from prompts import build_system_prompt
 from typing import Literal
 from typedefs import (
     TextMessageContent, ToolResultMessageContent, ToolUseMessageContent,
     ToolFailure, UserMessage, SystemMessage, ShellCallback, AgentCallback
 )
 from adapter import acompletion
+from dotenv import load_dotenv
 from transcript import Transcript
 from hooks import HookManager, initial_setup_hook
 from tools.registry import ToolRegistry
 from tools.core import create_core_registry
 
-from dotenv import load_dotenv
+
 load_dotenv(".env.development")
+logging.basicConfig(level=logging.WARNING)
 
 async def handle_shell(callback: ShellCallback) -> tuple[str, bool]:
     """
@@ -205,7 +210,7 @@ async def run_agentic_loop(transcript: Transcript, registry: ToolRegistry, hooks
 
         transcript.append(UserMessage(content=tool_results_content))
 
-def get_transcript_path(resume_arg: str | None) -> Path:
+def get_transcript_path(app_config: AppConfig, cwd: Path, resume_arg: str | None) -> Path:
     """Determines where to load/save the transcript file."""
     if resume_arg:
         path = Path(resume_arg).expanduser().resolve()
@@ -215,14 +220,18 @@ def get_transcript_path(resume_arg: str | None) -> Path:
     
     # Default behavior: create a hidden `.agent/transcripts/` folder in the current directory
     timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    default_dir = Path.cwd() / ".agent" / "transcripts"
+    default_dir = app_config.project_transcripts_dir(cwd)
     default_dir.mkdir(parents=True, exist_ok=True)
     return default_dir / f"{timestamp}.jsonl"
 
 
 async def main():
+    # Get app config
+    app_config = load_app_config()
+    cwd = Path.cwd()
+    
     # Parse Command Line Arguments
-    parser = argparse.ArgumentParser(description="Native Code Agent")
+    parser = argparse.ArgumentParser(description=f"{app_config.app_name.capitalize()} Code Agent")
     parser.add_argument("--resume", type=str, help="Path to an existing .jsonl transcript to resume")
     parser.add_argument(
         "--model", 
@@ -230,10 +239,28 @@ async def main():
         default="ollama/gemma3:12b",
         help="LLM model (e.g. anthropic/claude-3-5-sonnet-20241022, ollama/qwen2.5-coder:14b, gpt-4o)"
     )
+
+    # System prompt customization flags
+    parser.add_argument(
+        "--system-prompt-file",
+        type=str,
+        default=None,
+        help="Path to a file whose contents replace the default user-customizable system instructions"
+    )
+    parser.add_argument(
+        "--no-global-system-prompt-file",
+        action="store_true",
+        help=f"Skip loading {app_config.global_system_prompt_file()}"
+    )
+    parser.add_argument(
+        "--no-proj-system-prompt-file",
+        action="store_true",
+        help=f"Skip loading {app_config.project_config_dir(cwd)}"
+    )
     args = parser.parse_args()
 
-    # Determine transcript file path
-    transcript_file = get_transcript_path(args.resume)
+    # Creates transcripts folder if it does not exists
+    transcript_file = get_transcript_path(app_config, cwd, args.resume)
     print(f"[TRANSCRIPT: {transcript_file}]")
     print(f"[MODEL: {args.model}]")
     
@@ -247,9 +274,9 @@ async def main():
 
     # System Prompt injection (only if transcript is brand new)
     if len(transcript.messages) == 0:
-        transcript.append(get_system_prompt())
+        transcript.append(build_system_prompt(app_config, cwd, args))
     
-    print("Welcome to Native Code Agent (Type '/quit' to exit)")
+    print(f"Welcome to {app_config.app_name.capitalize()} Code Agent (Type '/quit' to exit)")
     
     while True:
         try:

@@ -1,1 +1,0 @@
-You are a coding agent that only deliver high quality code.
