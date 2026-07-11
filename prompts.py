@@ -32,6 +32,7 @@ def _load_optional_text(path: Path) -> str | None:
         logging.warning("Failed to read %s: %s", path, e)
         return None
 
+
 def _load_core_instructions(app_config: AppConfig):
     """
     Contains anything related to tools, capabilities, or operational behavior.
@@ -49,6 +50,7 @@ def _load_core_instructions(app_config: AppConfig):
     - Make reasonable assumptions and continue unless critical information is missing. If a complete implementation exceeds the response limit, continue in subsequent responses instead of reducing quality or completeness.
     """)
     return core_sys_prompt
+
 
 def _load_user_instructions(args) -> str:
     """
@@ -70,6 +72,7 @@ def _load_user_instructions(args) -> str:
         )
         return _DEFAULT_USER_INSTRUCTIONS
     return text
+
 
 def build_system_prompt(app_config: AppConfig, cwd: Path, args) -> SystemMessage:
     parts: list[str] = []

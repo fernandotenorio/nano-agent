@@ -255,7 +255,7 @@ async def main():
     parser.add_argument(
         "--no-proj-system-prompt-file",
         action="store_true",
-        help=f"Skip loading {app_config.project_config_dir(cwd)}"
+        help=f"Skip loading {app_config.project_system_prompt_file(cwd)}"
     )
     args = parser.parse_args()
 
