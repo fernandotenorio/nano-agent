@@ -41,7 +41,7 @@ async def _task_impl(kwargs: dict[str, Any]) -> ToolReturnType:
     description = kwargs.get("description", "Delegated sub-task")
     subagent_type = kwargs.get("subagent_type", "default-agent")
     
-    if not prompt:
+    if not prompt or not str(prompt).strip():
         return ToolFailure(error_message="Error: prompt is required.")
 
     # Find the requested profile
@@ -50,26 +50,13 @@ async def _task_impl(kwargs: dict[str, Any]) -> ToolReturnType:
         available = ", ".join(sa.type for sa in _SUB_AGENTS)
         return ToolFailure(error_message=f"Error: subagent_type '{subagent_type}' not recognized. Available: {available}")
 
-    # Prepare user content (including CLAUDE.md if it exists)
-    # TODO: dedup CLAUDE.md injection
-    claude_path = Path("CLAUDE.md")
-    claude_text = ""
-    if claude_path.exists():
-        content = claude_path.read_text(encoding="utf-8")
-        claude_text = dedent(f'''
-        <system-reminder>
-        Project instructions:
-
-        {content}
-        
-        </system-reminder>''')
-
+    # No more file IO here! Just pass the raw prompt.
     return AgentCallback(
         subagent_type=subagent_type,
         callback_description=description,
         tools=profile.tools,
         system_content=get_subagent_system_prompt(profile),        
-        user_content=f"{claude_text}{prompt}"
+        user_content=prompt 
     )
 
 def register_tasks_tools(registry: ToolRegistry):

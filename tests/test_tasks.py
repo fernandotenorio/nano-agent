@@ -35,6 +35,12 @@ class TestSubAgentTasks(unittest.IsolatedAsyncioTestCase):
         self.assertIn("default-agent", result.error_message)
         self.assertIn("code-reviewer", result.error_message)
 
+    async def test_whitespace_prompt(self):
+        """Test 1.3: Task safely rejects prompts that are just whitespace."""
+        result = await _task_impl({"prompt": "   ", "subagent_type": "default-agent"})
+        self.assertIsInstance(result, ToolFailure)
+        self.assertIn("prompt is required", result.error_message)
+
 
     # ---------------------------------------------------------
     # GROUP 2: Successful Profile Routing
@@ -69,41 +75,6 @@ class TestSubAgentTasks(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.subagent_type, "code-reviewer")
         self.assertEqual(result.callback_description, "Checking for security bugs")
         self.assertEqual(result.tools, ["Read", "Bash"])  # Strictly restricted
-
-
-    # ---------------------------------------------------------
-    # GROUP 3: Context Injection (AGENTS.md)
-    # ---------------------------------------------------------
-
-    @patch("tools.tasks.Path")
-    async def test_context_injection_file_missing(self, mock_path):
-        """Test 3.1: If AGENTS.md is missing, prompt is untouched."""
-        mock_path_instance = mock_path.return_value
-        mock_path_instance.exists.return_value = False
-        
-        result = await _task_impl({"prompt": "Raw prompt."})
-        
-        self.assertIsInstance(result, AgentCallback)
-        self.assertEqual(result.user_content, "Raw prompt.")
-        mock_path_instance.read_text.assert_not_called()
-
-    @patch("tools.tasks.Path")
-    async def test_context_injection_success(self, mock_path):
-        """Test 3.2: If AGENTS.md exists, it wraps into the prompt automatically."""
-        mock_path_instance = mock_path.return_value
-        mock_path_instance.exists.return_value = True
-        mock_path_instance.read_text.return_value = "Use 4 spaces."
-        
-        result = await _task_impl({"prompt": "Fix formatting."})
-        
-        self.assertIsInstance(result, AgentCallback)
-        self.assertIn("<system-reminder>", result.user_content)
-        self.assertIn("Project instructions:", result.user_content)
-        self.assertIn("Use 4 spaces.", result.user_content)
-        self.assertIn("</system-reminder>", result.user_content)
-        
-        # Ensure the actual LLM prompt is at the END of the string
-        self.assertTrue(result.user_content.endswith("Fix formatting."))
 
 
     # ---------------------------------------------------------
@@ -149,6 +120,28 @@ class TestSubAgentTasks(unittest.IsolatedAsyncioTestCase):
         # Verify it lists the code-reviewer and documents its restricted tools
         self.assertIn("code-reviewer", description)
         self.assertIn("Tools: Read, Bash", description)
+
+    def test_schema_required_properties(self):
+        """Test 5.2: The tool schema strictly enforces required arguments."""
+        mock_registry = MagicMock()
+        register_tasks_tools(mock_registry)
+        
+        call_kwargs = mock_registry.register.call_args[1]
+        schema = call_kwargs["input_schema"]
+        
+        # Verify it's an object type schema
+        self.assertEqual(schema["type"], "object")
+        
+        # Verify the required properties list is exact
+        required_fields = schema.get("required", [])
+        self.assertIn("description", required_fields)
+        self.assertIn("prompt", required_fields)
+        self.assertIn("subagent_type", required_fields)
+        
+        # Verify all required fields actually exist in the properties dict
+        properties = schema.get("properties", {})
+        for req in required_fields:
+            self.assertIn(req, properties)
 
 
 if __name__ == "__main__":

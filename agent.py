@@ -92,8 +92,6 @@ async def handle_subagent(
     """Spins up a recursive sub-agent loop."""
     print(f"  >> [Sub-Agent '{callback.subagent_type}' started] Task: {callback.callback_description}")
     
-    # Put the sub-agent transcript in the exact same directory as the parent transcript
-    # Naming convention: {parent_name}_{subagent_type}_{short_uuid}.jsonl
     parent_dir = parent_transcript_path.parent
     sub_id = uuid.uuid4().hex[:6]
     sub_transcript_path = parent_dir / f"{parent_transcript_path.stem}_{callback.subagent_type}_{sub_id}.jsonl"
@@ -104,10 +102,25 @@ async def handle_subagent(
     # 1. Inject the Sub-Agent's specific System Prompt
     sub_transcript.append(SystemMessage(content=callback.system_content))
     
-    # 2. Inject the Task instructions as the first User Message
-    sub_transcript.append(UserMessage(content=[TextMessageContent(text=callback.user_content)]))
+    # 2. Fire the user hooks (This automatically injects AGENTS.md via initial_setup_hook!)
+    event = await hooks.trigger_user_prompt(callback.user_content, is_first_prompt=True)
     
-    # 3. Filter tools if the profile restricts them
+    # Handle hook blocks (e.g. if a future hook denies the sub-agent prompt)
+    if event.block:
+        print(f"  >> [Sub-Agent BLOCKED]: {event.block_reason}")
+        return [TextMessageContent(text=f"Sub-agent blocked before starting: {event.block_reason}")], True
+
+    # Assemble the payload just like the main loop
+    message_content = [
+        *event.context_pre,
+        TextMessageContent(text=event.prompt),
+        *event.context_post
+    ]
+    
+    # 3. Inject the Task instructions as the first User Message
+    sub_transcript.append(UserMessage(content=message_content))
+    
+    # 4. Filter tools if the profile restricts them
     sub_registry = parent_registry
     if callback.tools is not None:
         sub_registry = parent_registry.clone_filtered(callback.tools)

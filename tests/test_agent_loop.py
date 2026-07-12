@@ -481,6 +481,15 @@ class TestHandleSubagentGroup4(unittest.IsolatedAsyncioTestCase):
         
         # Mock Hook Manager
         self.hooks = MagicMock()
+        
+        # We must mock trigger_user_prompt as an AsyncMock 
+        # and ensure it returns a valid UserPromptEvent payload.
+        from hooks import UserPromptEvent
+        self.hooks.trigger_user_prompt = AsyncMock(
+            side_effect=lambda prompt, is_first_prompt: UserPromptEvent(
+                prompt=prompt, is_first_prompt=is_first_prompt
+            )
+        )
 
     def _create_callback(self, tools: list[str] | None = None) -> AgentCallback:
         """Helper to create a sub-agent callback payload."""
