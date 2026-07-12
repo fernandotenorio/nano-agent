@@ -290,7 +290,7 @@ class TestExecuteToolGroup2(unittest.IsolatedAsyncioTestCase):
     async def test_post_hook_context_injection(self, mock_print):
         """
         Test 2.5: Post-Hook Context Injection
-        If the post-hook returns additional context (like CLAUDE.md injections or state reminders),
+        If the post-hook returns additional context (like AGENTS.md injections or state reminders),
         it should be appended alongside the tool result.
         """
         # Setup

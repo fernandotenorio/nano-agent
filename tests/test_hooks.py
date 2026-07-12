@@ -9,7 +9,7 @@ class TestHooks(unittest.IsolatedAsyncioTestCase):
     """
     Test Suite for Hook Manager (hooks.py)
     Validates hook execution chaining, context modification, short-circuit blocking, 
-    and the built-in initial_setup_hook (CLAUDE.md injector).
+    and the built-in initial_setup_hook (AGENTS.md injector).
     """
 
     def setUp(self):
@@ -125,7 +125,7 @@ class TestHooks(unittest.IsolatedAsyncioTestCase):
 
 
     # ---------------------------------------------------------
-    # GROUP 4: Built-in CLAUDE.md Hook (initial_setup_hook)
+    # GROUP 4: Built-in AGENTS.md Hook (initial_setup_hook)
     # ---------------------------------------------------------
 
     @patch("hooks.gather_context_files")

@@ -22,7 +22,7 @@ async def acompletion(model: str, tools: list[mcp.Tool], messages: list[SystemMe
 
     # Prompt caching strategy.
     # Observation: our message list grows monotonically in a given transcript,
-    # and every fresh transcript for a given CLAUDE.md will share much the same initial message.
+    # and every fresh transcript for a given AGENTS.md will share much the same initial message.
     # 1. OpenAI automatically caches prompt prefixes every 128 tokens, for prompts that are 1024 tokens or longer.
     #    It routes requests to a machine based on a combination of the first 256 tokens
     #    and the prompt_cache_key. We use the current working directory as our
@@ -33,7 +33,7 @@ async def acompletion(model: str, tools: list[mcp.Tool], messages: list[SystemMe
     #    via "cache_control" markers in the message content. (These markers cause
     #    gemini to fail; they should only be added if using anthropic). We add them here:
     #    - message 0, likely the system message shared by every user of the same core-tools,
-    #    - message 1, likely the initial user message that contains CLAUDE.md and is shared by all transcripts for this project
+    #    - message 1, likely the initial user message that contains AGENTS.md and is shared by all transcripts for this project
     #    - message N-1, the final user message, shared by the next iteration of this agent
     openai_prompt_cache_key = str(hash(str(Path.cwd())))  # used by OpenAI
     is_anthropic = model.startswith("anthropic/") or model.startswith("claude")

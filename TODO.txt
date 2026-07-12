@@ -5,8 +5,6 @@
 -add flag option to either append or overwrite system prompt: claude-code seems to 
 use --system-prompt to override and --append-system-prompt to append.
 
--refactor CLAUDE.md discovery and change it to agents.md.
-
 -add more/missing agent tests.
 
 -implement plan mode and remaining basic tools.

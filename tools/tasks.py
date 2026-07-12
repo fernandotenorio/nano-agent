@@ -55,7 +55,7 @@ async def _task_impl(kwargs: dict[str, Any]) -> ToolReturnType:
     claude_path = Path("CLAUDE.md")
     claude_text = ""
     if claude_path.exists():
-        content = claude_path.read_text(encoding="utf-8")        
+        content = claude_path.read_text(encoding="utf-8")
         claude_text = dedent(f'''
         <system-reminder>
         Project instructions:

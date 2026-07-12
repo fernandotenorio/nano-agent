@@ -11,7 +11,7 @@ from typedefs import ToolFailure, AgentCallback
 class TestSubAgentTasks(unittest.IsolatedAsyncioTestCase):
     """
     Test Suite for Sub-Agent Tasks (tasks.py)
-    Validates parameter routing, profile selection, CLAUDE.md injection,
+    Validates parameter routing, profile selection, AGENTS.md injection,
     and dynamic LLM schema generation.
     """
 
@@ -43,7 +43,7 @@ class TestSubAgentTasks(unittest.IsolatedAsyncioTestCase):
     @patch("tools.tasks.Path")
     async def test_default_fallbacks(self, mock_path):
         """Test 2.1: Missing optional parameters default to standard values."""
-        # Ensure no CLAUDE.md interference
+        # Ensure no AGENTS.md interference
         mock_path.return_value.exists.return_value = False
         
         result = await _task_impl({"prompt": "Explore the code."})
@@ -72,12 +72,12 @@ class TestSubAgentTasks(unittest.IsolatedAsyncioTestCase):
 
 
     # ---------------------------------------------------------
-    # GROUP 3: Context Injection (CLAUDE.md)
+    # GROUP 3: Context Injection (AGENTS.md)
     # ---------------------------------------------------------
 
     @patch("tools.tasks.Path")
     async def test_context_injection_file_missing(self, mock_path):
-        """Test 3.1: If CLAUDE.md is missing, prompt is untouched."""
+        """Test 3.1: If AGENTS.md is missing, prompt is untouched."""
         mock_path_instance = mock_path.return_value
         mock_path_instance.exists.return_value = False
         
@@ -89,7 +89,7 @@ class TestSubAgentTasks(unittest.IsolatedAsyncioTestCase):
 
     @patch("tools.tasks.Path")
     async def test_context_injection_success(self, mock_path):
-        """Test 3.2: If CLAUDE.md exists, it wraps into the prompt automatically."""
+        """Test 3.2: If AGENTS.md exists, it wraps into the prompt automatically."""
         mock_path_instance = mock_path.return_value
         mock_path_instance.exists.return_value = True
         mock_path_instance.read_text.return_value = "Use 4 spaces."
