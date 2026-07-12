@@ -728,7 +728,7 @@ class TestMainLoopGroup5(unittest.IsolatedAsyncioTestCase):
         """
         Test 5.4: First Prompt Flag
         The orchestrator must accurately tell the hook if this is the very first 
-        user prompt in the conversation to optimize disk IO (e.g. loading CLAUDE.md).
+        user prompt in the conversation to optimize disk IO (e.g. loading AGENTS.md).
         """
         mock_transcript_cls.return_value = MockTranscriptState(Path("/mock/main.jsonl"))
         
