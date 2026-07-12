@@ -4,6 +4,8 @@ from pathlib import Path
 from textwrap import dedent
 from typing import Literal, Callable, Awaitable
 from typedefs import TextMessageContent
+from config import AppConfig
+from context import gather_context_files
 
 # ---------------------------------------------------------
 # Event Context Models
@@ -78,25 +80,29 @@ class HookManager:
         return event
 
 # ---------------------------------------------------------
-# Sample Built-in Hook: CLAUDE.md Injector
+# Built-in Hook: Agends.md Context Injector
 # ---------------------------------------------------------
 
-async def initial_setup_hook(event: UserPromptEvent) -> UserPromptEvent:
-    """Injects CLAUDE.md on the very first user prompt."""
+async def initial_setup_hook(
+    event: UserPromptEvent, 
+    app_config: AppConfig, 
+    root: Path, 
+    cwd: Path
+) -> UserPromptEvent:
+    """Injects AGENTS.md context on the very first user prompt."""
 
     # Fast exit: No disk I/O if we are already mid-conversation!
     if not event.is_first_prompt:
         return event
 
-    claude_path = Path("CLAUDE.md")
-    if claude_path.exists():
-        content = claude_path.read_text(encoding="utf-8")
-
+    context_text = gather_context_files(app_config, root, cwd)
+    
+    if context_text:
         reminder = dedent(f'''
         <system-reminder>
-        You can use the following context as you answer the user's questions:
+        You can use the following project context as you answer the user's questions:
 
-        {content}
+        {context_text}
         
         </system-reminder>''')
         event.context_pre.append(TextMessageContent(text=reminder))

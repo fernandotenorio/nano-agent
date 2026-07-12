@@ -3,6 +3,7 @@ import os
 import sys
 import argparse
 import uuid
+from functools import partial
 from pathlib import Path
 from datetime import datetime
 import logging
@@ -240,6 +241,14 @@ async def main():
         help="LLM model (e.g. anthropic/claude-3-5-sonnet-20241022, ollama/qwen2.5-coder:14b, gpt-4o)"
     )
 
+    # project workspace
+    parser.add_argument(
+        "--root-dir",
+        type=str,
+        default=None,
+        help="The workspace root directory (defaults to current working directory)"
+    )
+
     # System prompt customization flags
     parser.add_argument(
         "--system-prompt-file",
@@ -257,17 +266,31 @@ async def main():
         action="store_true",
         help=f"Skip loading {app_config.project_system_prompt_file(cwd)}"
     )
+
     args = parser.parse_args()
+
+    # Root directory resolution and validation
+    root_dir = Path(args.root_dir).expanduser().resolve() if args.root_dir else cwd
+
+    # Exit with error if cwd it no within workspace dir
+    if not cwd.is_relative_to(root_dir):
+        print(f"Error: Current directory ({cwd}) is not within the specified --root-dir ({root_dir}).")
+        sys.exit(1)
 
     # Creates transcripts folder if it does not exists
     transcript_file = get_transcript_path(app_config, cwd, args.resume)
     print(f"[TRANSCRIPT: {transcript_file}]")
     print(f"[MODEL: {args.model}]")
+
+    if root_dir != cwd:
+        print(f"[ROOT: {root_dir}]")
     
     # Initialize State
     registry = create_core_registry()
     hooks = HookManager()
-    hooks.register_user_prompt(initial_setup_hook)
+    
+    bound_hook = partial(initial_setup_hook, app_config=app_config, root=root_dir, cwd=cwd)
+    hooks.register_user_prompt(bound_hook)
     
     # Load (or create) the main transcript
     transcript = Transcript(transcript_file)

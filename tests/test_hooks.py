@@ -128,42 +128,58 @@ class TestHooks(unittest.IsolatedAsyncioTestCase):
     # GROUP 4: Built-in CLAUDE.md Hook (initial_setup_hook)
     # ---------------------------------------------------------
 
-    @patch("hooks.Path")
-    async def test_claude_md_fast_exit(self, mock_path):
+    @patch("hooks.gather_context_files")
+    async def test_context_injection_fast_exit(self, mock_gather):
         """Test 4.1: Hook exits immediately with zero IO if is_first_prompt=False."""
+        from config import AppConfig
+        from pathlib import Path
+        
         event = UserPromptEvent(prompt="continue task", is_first_prompt=False)
+        app_config = AppConfig(app_name="test", app_dir_name=".test")
+        root = Path("/dummy")
+        cwd = Path("/dummy")
         
-        result = await initial_setup_hook(event)
+        result = await initial_setup_hook(event, app_config, root, cwd)
         
-        # Assert Path("CLAUDE.md") was NEVER even instantiated
-        mock_path.assert_not_called()
+        # Assert gather_context_files was NEVER called
+        mock_gather.assert_not_called()
         self.assertEqual(len(result.context_pre), 0)
 
-    @patch("hooks.Path")
-    async def test_claude_md_missing(self, mock_path):
-        """Test 4.2: Hook degrades gracefully if CLAUDE.md does not exist."""
-        # Setup Path("CLAUDE.md").exists() to return False
-        mock_path_instance = mock_path.return_value
-        mock_path_instance.exists.return_value = False
+    @patch("hooks.gather_context_files")
+    async def test_context_injection_empty(self, mock_gather):
+        """Test 4.2: Hook degrades gracefully if no AGENTS.md files are found."""
+        from config import AppConfig
+        from pathlib import Path
+        
+        # Setup gather_context_files to return an empty string
+        mock_gather.return_value = ""
         
         event = UserPromptEvent(prompt="start task", is_first_prompt=True)
-        result = await initial_setup_hook(event)
+        app_config = AppConfig(app_name="test", app_dir_name=".test")
+        root = Path("/dummy")
+        cwd = Path("/dummy")
         
-        # Verify it checked for existence, but didn't read
-        mock_path_instance.exists.assert_called_once()
-        mock_path_instance.read_text.assert_not_called()
+        result = await initial_setup_hook(event, app_config, root, cwd)
+        
+        # Verify it was called with the right arguments, but injected nothing
+        mock_gather.assert_called_once_with(app_config, root, cwd)
         self.assertEqual(len(result.context_pre), 0)
 
-    @patch("hooks.Path")
-    async def test_claude_md_injection_success(self, mock_path):
-        """Test 4.3: Hook successfully reads and wraps CLAUDE.md text."""
-        # Setup Path("CLAUDE.md") mock
-        mock_path_instance = mock_path.return_value
-        mock_path_instance.exists.return_value = True
-        mock_path_instance.read_text.return_value = "Always write unit tests."
+    @patch("hooks.gather_context_files")
+    async def test_context_injection_success(self, mock_gather):
+        """Test 4.3: Hook successfully reads and wraps AGENTS.md text."""
+        from config import AppConfig
+        from pathlib import Path
+        
+        # Setup gather_context_files mock
+        mock_gather.return_value = "Always write unit tests."
         
         event = UserPromptEvent(prompt="start task", is_first_prompt=True)
-        result = await initial_setup_hook(event)
+        app_config = AppConfig(app_name="test", app_dir_name=".test")
+        root = Path("/dummy")
+        cwd = Path("/dummy/src")
+        
+        result = await initial_setup_hook(event, app_config, root, cwd)
         
         self.assertEqual(len(result.context_pre), 1)
         
