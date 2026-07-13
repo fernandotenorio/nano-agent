@@ -5,7 +5,7 @@ from unittest.mock import patch, MagicMock
 
 # Import the target module and its global state
 import tools.filesystem as fs
-from tools.filesystem import _read_impl, _write_impl, _edit_impl
+from tools.filesystem import _read_impl, _write_impl, _edit_impl, _multiedit_impl
 from typedefs import ToolFailure
 
 
@@ -239,6 +239,193 @@ class TestFilesystemTools(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(result, ToolFailure)
         self.assertIn("Error writing to file", result.error_message)
         self.assertIn("Access denied", result.error_message)
+
+
+    # ---------------------------------------------------------
+    # MULTI-EDIT TOOL TESTS
+    # ---------------------------------------------------------
+
+    async def test_multiedit_missing_or_invalid_args(self):
+        # 1. Missing file_path
+        res1 = await _multiedit_impl({"edits": [{"old_string": "a", "new_string": "b"}]})
+        self.assertIsInstance(res1, ToolFailure)
+        self.assertIn("file_path is required", res1.error_message)
+        
+        # 2. Missing edits
+        res2 = await _multiedit_impl({"file_path": "a.txt"})
+        self.assertIsInstance(res2, ToolFailure)
+        self.assertIn("edits must be a list", res2.error_message)
+
+        # 3. Empty edits list
+        res3 = await _multiedit_impl({"file_path": "a.txt", "edits": []})
+        self.assertIsInstance(res3, ToolFailure)
+        self.assertIn("at least one edit is required", res3.error_message)
+
+        # 4. Invalid edit schema (missing new_string)
+        res4 = await _multiedit_impl({
+            "file_path": "a.txt", 
+            "edits": [{"old_string": "a"}]
+        })
+        self.assertIsInstance(res4, ToolFailure)
+        self.assertIn("objects with old_string, new_string", res4.error_message)
+
+    async def test_multiedit_read_before_edit_enforcement(self):
+        file_path = self.base_path / "script.py"
+        file_path.write_text("x = 10\ny = 20")
+        
+        result = await _multiedit_impl({
+            "file_path": str(file_path), 
+            "edits": [{"old_string": "x = 10", "new_string": "x = 15"}]
+        })
+        self.assertIsInstance(result, ToolFailure)
+        self.assertIn("File has not been read yet", result.error_message)
+
+    async def test_multiedit_file_not_exist(self):
+        file_path = self.base_path / "ghost.txt"
+        
+        result = await _multiedit_impl({
+            "file_path": str(file_path),
+            "edits": [{"old_string": "a", "new_string": "b"}]
+        })
+        self.assertIsInstance(result, ToolFailure)
+        self.assertIn("file does not exist", result.error_message)
+
+    async def test_multiedit_preflight_failures(self):
+        file_path = self.base_path / "data.txt"
+        file_path.write_text("hello world")
+        await _read_impl({"file_path": str(file_path)})
+        
+        # 1. Empty old_string
+        res1 = await _multiedit_impl({
+            "file_path": str(file_path),
+            "edits": [{"old_string": "", "new_string": "foo"}]
+        })
+        self.assertIsInstance(res1, ToolFailure)
+        self.assertIn("old_string cannot be empty", res1.error_message)
+        
+        # 2. No changes (old == new)
+        res2 = await _multiedit_impl({
+            "file_path": str(file_path),
+            "edits": [{"old_string": "hello", "new_string": "hello"}]
+        })
+        self.assertIsInstance(res2, ToolFailure)
+        self.assertIn("exactly the same", res2.error_message)
+
+    async def test_multiedit_overlap_rejection(self):
+        file_path = self.base_path / "overlap.txt"
+        file_path.write_text("abcdef")
+        await _read_impl({"file_path": str(file_path)})
+        
+        # "bcd" and "cde" overlap on "c" and "d"
+        result = await _multiedit_impl({
+            "file_path": str(file_path),
+            "edits": [
+                {"old_string": "bcd", "new_string": "123"},
+                {"old_string": "cde", "new_string": "456"}
+            ]
+        })
+        
+        self.assertIsInstance(result, ToolFailure)
+        self.assertIn("overlaps with an earlier edit", result.error_message)
+
+    async def test_multiedit_cascading_rejection(self):
+        file_path = self.base_path / "cascade.txt"
+        
+        # FIX: Include "range" in the initial file so it passes the `not in old_content` check
+        file_path.write_text("apple tree range")
+        await _read_impl({"file_path": str(file_path)})
+        
+        # Edit 1 turns "apple" -> "orange"
+        # Edit 2 targets "range" (which is a substring of "orange")
+        result = await _multiedit_impl({
+            "file_path": str(file_path),
+            "edits": [
+                {"old_string": "apple", "new_string": "orange"},
+                {"old_string": "range", "new_string": "grape"}
+            ]
+        })
+        
+        self.assertIsInstance(result, ToolFailure)
+        self.assertIn("old_string is a substring of a new_string", result.error_message)
+
+    async def test_multiedit_ambiguous_replacement(self):
+        file_path = self.base_path / "ambiguous.txt"
+        file_path.write_text("test\nverify\ntest\n")
+        await _read_impl({"file_path": str(file_path)})
+        
+        # 'test' appears twice, replace_all is False by default.
+        # one_edit_check should catch this.
+        result = await _multiedit_impl({
+            "file_path": str(file_path),
+            "edits": [
+                {"old_string": "verify", "new_string": "check"},
+                {"old_string": "test", "new_string": "exam"}
+            ]
+        })
+        
+        self.assertIsInstance(result, ToolFailure)
+        self.assertIn("Found 2 matches", result.error_message)
+        self.assertIn("replace_all is false", result.error_message)
+        
+        # Verify file was NOT modified because the transaction failed mid-way
+        self.assertEqual(file_path.read_text(), "test\nverify\ntest\n")
+
+    async def test_multiedit_success(self):
+        file_path = self.base_path / "success.txt"
+        file_path.write_text("The quick brown fox\njumps over the lazy dog.")
+        await _read_impl({"file_path": str(file_path)})
+        
+        result = await _multiedit_impl({
+            "file_path": str(file_path),
+            "edits": [
+                {"old_string": "quick", "new_string": "slow"},
+                {"old_string": "brown", "new_string": "red"},
+                {"old_string": "lazy", "new_string": "sleepy"}
+            ]
+        })
+        
+        self.assertNotIsInstance(result, ToolFailure)
+        
+        expected_content = "The slow red fox\njumps over the sleepy dog."
+        self.assertEqual(file_path.read_text(), expected_content)
+        
+        # Verify response formatting
+        self.assertIn("Applied 3 edits to", result)
+        self.assertIn('1. Replaced "quick" with "slow"', result)
+        self.assertIn('3. Replaced "lazy" with "sleepy"', result)
+        
+        # Verify state tracker updated
+        self.assertEqual(fs.known_content_files[file_path], expected_content.splitlines())
+
+    async def test_multiedit_success_with_replace_all(self):
+        file_path = self.base_path / "replace_all.txt"
+        file_path.write_text("foo bar foo baz")
+        await _read_impl({"file_path": str(file_path)})
+        
+        result = await _multiedit_impl({
+            "file_path": str(file_path),
+            "edits": [
+                {"old_string": "foo", "new_string": "qux", "replace_all": True}
+            ]
+        })
+        
+        self.assertNotIsInstance(result, ToolFailure)
+        self.assertEqual(file_path.read_text(), "qux bar qux baz")
+
+    async def test_multiedit_exception_handling_on_write(self):
+        file_path = self.base_path / "fail_write.txt"
+        file_path.write_text("data")
+        await _read_impl({"file_path": str(file_path)})
+        
+        with patch("pathlib.Path.write_text", side_effect=OSError("Disk full")):
+            result = await _multiedit_impl({
+                "file_path": str(file_path),
+                "edits": [{"old_string": "data", "new_string": "info"}]
+            })
+            
+        self.assertIsInstance(result, ToolFailure)
+        self.assertIn("Error writing to file", result.error_message)
+        self.assertIn("Disk full", result.error_message)
 
 
 if __name__ == "__main__":

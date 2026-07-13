@@ -1,6 +1,7 @@
 # tools/filesystem.py
 
 import pydantic
+import uuid
 from pathlib import Path
 from typedefs import ToolFailure
 from textwrap import dedent
@@ -200,6 +201,96 @@ async def _edit_impl(kwargs: dict[str, Any]) -> ToolReturnType:
     return text
 
 
+async def _multiedit_impl(kwargs: dict[str, Any]) -> ToolReturnType:
+    """Applies multiple search-and-replace edits to a file sequentially."""
+    file_path_str = kwargs.get("file_path")
+    edits_data = kwargs.get("edits")
+
+    if not file_path_str:
+        return ToolFailure(error_message="Error: file_path is required.")
+
+    if edits_data is None or not isinstance(edits_data, list):
+        return ToolFailure(error_message="Error: edits must be a list of edit objects.")
+
+    file_path = Path(file_path_str).resolve()
+    
+    # 1. Parse edits
+    try:
+        edits = [OneEdit(**edit) for edit in edits_data]
+    except pydantic.ValidationError as e:
+        return ToolFailure(
+            error_message="Error: edits must be a list of objects with old_string, new_string, and optional replace_all."
+        )
+
+    if not edits:
+        return ToolFailure(error_message="Error: at least one edit is required.")
+
+    # 2. File State Validation
+    if not file_path.exists():
+        return ToolFailure(error_message="Error: file does not exist.")
+
+    # Enforce Read-before-Write
+    if file_path not in known_content_files or file_path in stale_content_files:
+        return ToolFailure(error_message=dedent("""\
+            Error: File has not been read yet.
+            Read it first before writing to it."""))
+
+    try:
+        old_content = file_path.read_text(encoding="utf-8")
+    except Exception as e:
+        return ToolFailure(error_message=f"Error reading file: {str(e)}")
+
+    # 3. Pre-flight checks on edits
+    for edit in edits:
+        if not edit.old_string:
+            return ToolFailure(error_message="Error: old_string cannot be empty.")
+        if edit.old_string == edit.new_string:
+            return ToolFailure(error_message="No changes to make: old_string and new_string are exactly the same.")
+
+    # Prevent overlapping edits using a UUID marker (safer than obscure unicode)
+    overlap_marker = f"__OVERLAP_MARKER_{uuid.uuid4().hex}__"
+    check_content = old_content
+    
+    for edit in edits:
+        if edit.old_string not in old_content:
+            return ToolFailure(error_message=f"String to replace not found in file.\nString: {edit.old_string}")
+        if edit.old_string not in check_content:
+            return ToolFailure(error_message=f"String to replace overlaps with an earlier edit.\nString: {edit.old_string}")
+        check_content = check_content.replace(edit.old_string, overlap_marker)
+
+    # Prevent cascading edits where a subsequent edit targets the output of a previous edit
+    if any(any(e1.old_string in e2.new_string for e2 in edits) for e1 in edits):
+        return ToolFailure(error_message="Cannot edit file: old_string is a substring of a new_string from a previous edit.")
+
+    # 4. Sequential Application
+    new_content = old_content
+    for edit in edits:
+        err = one_edit_check(file_path, new_content, edit)
+        if err:
+            return ToolFailure(error_message=err)
+        # Note: if replace_all is False, one_edit_check enforces count == 1, 
+        # so global replace is safe and mathematically equivalent to replacing the only instance.
+        new_content = new_content.replace(edit.old_string, edit.new_string)
+
+    # 5. Commit to disk
+    try:
+        file_path.write_text(new_content, encoding="utf-8")
+    except Exception as e:
+        return ToolFailure(error_message=f"Error writing to file: {str(e)}")
+
+    # 6. Update State Trackers
+    known_content_files[file_path] = new_content.splitlines() if len(new_content) < MAX_FILE_BYTES else None
+    stale_content_files.discard(file_path)
+
+    # 7. Format Response
+    edit_plural = "s" if len(edits) > 1 else ""
+    summary_lines = [f"Applied {len(edits)} edit{edit_plural} to {file_path_str}:"]
+    
+    for i, edit in enumerate(edits, start=1):
+        summary_lines.append(f'{i}. Replaced "{edit.old_string}" with "{edit.new_string}"')
+
+    return "\n".join(summary_lines)
+
 
 def register_fs_tools(registry: ToolRegistry):
     registry.register(
@@ -289,4 +380,55 @@ def register_fs_tools(registry: ToolRegistry):
             "required": ["file_path", "old_string", "new_string"]
         },
         func=_edit_impl
+    )
+
+    registry.register(
+        name="MultiEdit",
+        description=dedent("""
+            This tool is like the Edit tool, but is faster and more elegant when you need to make multiple edits to a single file,
+            especially to different parts of a file.
+            - You must read the file before doing any edits.
+            - You should prefer this over the Edit tool when you have to make multiple changes to a file.
+            - This does exact string replacements. You have to get exact indentation right.
+            - To replace all occurrences, you must set the 'replace_all' parameter to true.
+            - To replace only one specific occurrence, you must provide enough surrounding context to make the match unique.
+            - Don't include line-numbers.
+
+            The list of edits are applied in order. They are applied atomically: either all, or none.
+            Overlapped edits are not allowed."""),        
+        input_schema={
+            "type": "object",
+            "properties": {
+                "edits": {
+                    "description": "A list of edits",
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_string": {
+                                "description": "Old content to replace (must be verbatim, including whitespace/indentation; can be multiline)",
+                                "type": "string"
+                            },
+                            "new_string": {
+                                "description": "New content to replace it with",
+                                "type": "string"
+                            },
+                            "replace_all": {
+                                "description": "Should all occurrences of old_string be replaced?",
+                                "type": "boolean",
+                                "default": False
+                            }
+                        },
+                        "required": ["old_string", "new_string"]
+                    }
+                },
+                "file_path": {
+                    "description": "Absolute path to the file",
+                    "type": "string"
+                }
+            },
+            "required": ["file_path", "edits"]
+        },
+        func=_multiedit_impl
     )
