@@ -292,7 +292,7 @@ async def _multiedit_impl(kwargs: dict[str, Any]) -> ToolReturnType:
     return "\n".join(summary_lines)
 
 
-def register_fs_tools(registry: ToolRegistry):
+def register_fsystem_tools(registry: ToolRegistry):
     registry.register(
         name="Read",
         description=dedent("""\
