@@ -1,5 +1,9 @@
 -review all builtin prompts (system and tools).
 
+-implement the file watcher.
+
+-update env info + system prompt to better explain the workspace/cwd strategy, also add 'Is this a git repo' field.
+
 -review tools descriptions: example, "cat -n in edit" seems unecessary.
 
 -add more/missing agent tests.
