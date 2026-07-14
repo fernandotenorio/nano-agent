@@ -1,3 +1,7 @@
+-add more glob tests.
+
+-see if returning diff string from edit is worth.
+
 -review all builtin prompts (system and tools).
 
 -implement the file watcher.

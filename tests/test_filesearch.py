@@ -27,7 +27,7 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
         self.test_dir.cleanup()
 
     def _create_file(self, relative_path: str, age_seconds: int = 0) -> Path:
-        """Helper to create a file and optionally backdate its modification time."""
+        """Helper to create a file and optionally backdate its modification time."""        
         file_path = self.base_path / relative_path
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(f"content of {relative_path}")
@@ -36,7 +36,7 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
             past_time = time.time() - age_seconds
             os.utime(file_path, (past_time, past_time))
             
-        return file_path
+        return file_path.name
 
     # ---------------------------------------------------------
     # VALIDATION & ERROR HANDLING

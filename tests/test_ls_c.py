@@ -67,7 +67,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_ignore_type(self):
         self._create_file("test.txt")
         # Pass garbage into the ignore list
-        result = await _ls_impl({"path": str(self.base_path), "ignore": [123, None, {"bad": "type"}]})
+        result = await _ls_impl({"path": str(self.base_path), "exclude": [123, None, {"bad": "type"}]})
         self.assertIsInstance(result, str)
         self.assertIn("test.txt", result)
 
@@ -164,7 +164,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await _ls_impl({
             "path": str(self.base_path), 
-            "ignore": ["*.log", "temp_*"]
+            "exclude": ["*.log", "temp_*"]
         })
         self.assertIsInstance(result, str)
         self.assertIn("keep.txt", result)

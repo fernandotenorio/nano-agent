@@ -1,7 +1,8 @@
 # tools/filesearch.py
-
+import asyncio
 import re
 import os
+import heapq
 import fnmatch
 import glob
 import itertools
@@ -11,83 +12,165 @@ from tools.registry import ToolRegistry, ToolReturnType
 from typing import Any, Iterator
 from typedefs import ToolFailure
 
-MAX_GLOB_RESULTS: int = 100
+from wcmatch import glob
 
+MAX_GLOB_RESULTS: int = 100
 MAX_LS_ENTRIES: int = 400
 
-DEFAULT_IGNORE = [
-    ".git", "__pycache__", "node_modules", ".venv", "venv", 
-    ".idea", ".vscode", "*.pyc", "*.pyo"
+EXCLUDED_DIRS = [
+    ".git",
+    "__pycache__",
+    "node_modules",
+    ".venv",
+    "venv",
+    ".idea",
+    ".vscode",
 ]
 
-def _expand_braces(pattern: str) -> list[str]:
-    """Expands bash-style brace patterns like 'src/{a,b}/*.py'."""
-    matches = list(re.finditer(r'\{([^}]+)\}', pattern))
-    parts: list[list[str]] = []
-    last_end = 0
-    
-    for match in matches:
-        parts.append([pattern[last_end:match.start()]])
-        parts.append(match.group(1).split(','))    
-        last_end = match.end()
-        
-    parts.append([pattern[last_end:]])
-    return [''.join(combo) for combo in itertools.product(*parts)]
+EXCLUDED_FILE_PATTERNS = [
+    "*.pyc",
+    "*.pyo",
+]
 
+DEFAULT_LS_EXCLUDE = (
+    EXCLUDED_DIRS +
+    EXCLUDED_FILE_PATTERNS
+)
+
+DEFAULT_GLOB_EXCLUDE_PATTERNS = (
+    [
+        pattern
+        for d in EXCLUDED_DIRS
+        for pattern in (f"{d}/**", f"**/{d}/**")
+    ]
+    + [f"**/{p}" for p in EXCLUDED_FILE_PATTERNS]
+)
 
 async def _glob_impl(kwargs: dict[str, Any]) -> ToolReturnType:
-    """Searches for files using a glob pattern, returning recently modified files first."""
+    """Search for files using glob patterns, returning newest files first."""
+
     pattern = kwargs.get("pattern")
-    # Default to current working directory if path is not provided
     path_str = kwargs.get("path", ".")
 
-    if not pattern:
+    if not isinstance(pattern, str) or not pattern:
         return ToolFailure(error_message="Error: pattern is required.")
 
-    base_path = Path(path_str).resolve()
-    
-    # Returning ToolFailure here helps the LLM realize it provided a bad path,
-    # rather than tricking it into thinking the directory is just empty.
-    if not base_path.exists() or not base_path.is_dir():
-        return ToolFailure(error_message=f"Error: Directory does not exist or is not a valid directory: {base_path}")
+    if not isinstance(path_str, str):
+        return ToolFailure(error_message="Error: path must be a string.")
 
     try:
-        patterns = _expand_braces(pattern)
-    except Exception as e:
-        return ToolFailure(error_message=f"Error expanding brace pattern: {str(e)}")
+        base_path = Path(path_str).resolve()
+        is_valid_dir = base_path.exists() and base_path.is_dir()
+    except (OSError, RuntimeError, ValueError) as e:
+        return ToolFailure(error_message=f"Error: could not resolve path {path_str!r}: {e}")
 
-    all_matches: set[Path] = set()
-
-    for pat in patterns:
-        search_target = str(base_path / pat)
-        # iglob is more memory efficient for massive directory structures
-        for match_str in glob.iglob(search_target, recursive=True):
-            p = Path(match_str)
-            if p.is_file():
-                all_matches.add(p)
-
-    if not all_matches:
-        return "No files found."
-
-    # Safe sorting by modification time (descending)
-    def get_mtime(p: Path) -> float:
-        try:
-            return p.stat().st_mtime
-        except OSError:
-            return 0.0
-
-    # We must sort FIRST, then truncate to MAX_GLOB_RESULTS
-    sorted_matches = sorted(list(all_matches), key=get_mtime, reverse=True)
-    
-    is_truncated = len(sorted_matches) > MAX_GLOB_RESULTS
-    result_paths = [str(m) for m in sorted_matches[:MAX_GLOB_RESULTS]]
-
-    if is_truncated:
-        result_paths.append(
-            f"(Results are truncated to {MAX_GLOB_RESULTS}. Consider using a more specific path or pattern.)"
+    if not is_valid_dir:
+        return ToolFailure(
+            error_message=f"Error: Directory does not exist or is not a valid directory: {base_path}"
         )
 
-    return "\n".join(result_paths)
+    raw_exclude = kwargs.get("exclude")
+    if isinstance(raw_exclude, str):
+        raw_exclude = [raw_exclude]
+    user_exclude = (
+        [x for x in raw_exclude if isinstance(x, str)]
+        if isinstance(raw_exclude, list)
+        else []
+    )
+
+    exclude_patterns = list(dict.fromkeys(DEFAULT_GLOB_EXCLUDE_PATTERNS + user_exclude))
+
+    flags = (
+        glob.GLOBSTAR |
+        glob.BRACE |
+        glob.DOTGLOB
+    )
+
+    try:
+        matcher = glob.compile(pattern, flags=flags)
+        exclude_matcher = (
+            glob.compile(exclude_patterns, flags=flags)
+            if exclude_patterns
+            else None
+        )
+    except Exception as e:
+        return ToolFailure(error_message=f"Error: invalid glob pattern: {e}")
+
+    heap: list[tuple[float, str]] = []
+    total_matches = 0
+
+    def walk_iterative(start: Path) -> None:
+        nonlocal total_matches
+        stack: list[Path] = [start]
+
+        while stack:
+            directory = stack.pop()
+
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+
+                        rel_path = os.path.relpath(entry.path, base_path)
+                        rel_path = rel_path.replace(os.sep, "/")
+
+                        try:
+                            is_symlink = entry.is_symlink()
+                        except OSError:
+                            continue
+
+                        if is_symlink:
+                            continue
+
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                if exclude_matcher and exclude_matcher.match(rel_path + "/"):
+                                    continue
+                                stack.append(Path(entry.path))
+                                continue
+
+                            if not entry.is_file(follow_symlinks=False):
+                                continue
+
+                        except OSError:
+                            continue
+
+                        if exclude_matcher and exclude_matcher.match(rel_path):
+                            continue
+
+                        if not matcher.match(rel_path):
+                            continue
+
+                        try:
+                            mtime = entry.stat(follow_symlinks=False).st_mtime
+                        except OSError:
+                            mtime = 0.0
+
+                        total_matches += 1
+                        item = (mtime, rel_path)
+
+                        if len(heap) < MAX_GLOB_RESULTS:
+                            heapq.heappush(heap, item)
+                        else:
+                            heapq.heappushpop(heap, item)
+
+            except OSError:
+                continue
+
+    await asyncio.to_thread(walk_iterative, base_path)
+
+    if not heap:
+        return "No files found."
+
+    results = sorted(heap, key=lambda x: (-x[0], x[1]))
+    lines = [path for _, path in results]
+
+    if total_matches > MAX_GLOB_RESULTS:
+        lines.append(
+            f"(Results are truncated to {MAX_GLOB_RESULTS}. "
+            "Consider using a more specific path, pattern, or exclude list.)"
+        )
+
+    return "\n".join(lines)
 
 
 async def _ls_impl(kwargs: dict[str, Any]) -> ToolReturnType:
@@ -106,10 +189,10 @@ async def _ls_impl(kwargs: dict[str, Any]) -> ToolReturnType:
         
     target_level = depth if depth >= 0 else -1
     
-    raw_ignore = kwargs.get("ignore")
+    raw_ignore = kwargs.get("exclude")
     # Defensively ensure all ignore patterns are actually strings
     user_ignore = [x for x in raw_ignore if isinstance(x, str)] if isinstance(raw_ignore, list) else []
-    ignore_patterns = user_ignore + DEFAULT_IGNORE
+    ignore_patterns = user_ignore + DEFAULT_LS_EXCLUDE
 
     # dedup, just in case
     ignore_patterns = list(set(ignore_patterns))
@@ -227,10 +310,17 @@ def register_fsearch_tools(registry: ToolRegistry):
     registry.register(
         name="Glob",
         description=dedent("""\
-            Search for files using glob patterns (e.g., '**/*.py', 'src/{a,b}/*.js'). Sorts results by modification time.
-            Use this rather than `grep` or `rg` for searching file names, because it is more efficient.
+            Search for files using glob patterns (e.g. '**/*.py', 'src/{a,b}/*.js').
+            Supports recursive globstars (**) and brace expansion ({a,b}).
+            Results are sorted by modification time (newest first).
+
+            Use this when searching by file name, as it avoids reading
+            file contents and is significantly more efficient.
+
+            Use the `exclude` parameter to skip directories or file patterns that are
+            not relevant (e.g. 'node_modules/**', 'vendor/**', '**/*.min.js').
             
-            If you are doing an ambiguous search that might need multiple successive attempts at Glob or Grep,
+            If you are doing an ambiguous search that might need multiple successive attempts at Glob,
             you should do so with the Task tool."""),
         input_schema={
             "type": "object",
@@ -242,6 +332,15 @@ def register_fsearch_tools(registry: ToolRegistry):
                 "pattern": {
                     "description": "The glob pattern to search with. Supports recursive (**) and brace expansion ({a,b}).",
                     "type": "string"
+                },
+                "exclude": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional glob patterns to exclude from the search. "
+                        "Useful for skipping large or irrelevant directories "
+                        "(e.g. 'node_modules/**', 'venv/**') or file patterns."
+                    )
                 }
             },
             "required": ["pattern"]
@@ -252,14 +351,21 @@ def register_fsearch_tools(registry: ToolRegistry):
     registry.register(
         name="ls",
         description=dedent("""\
-            Lists the contents of a directory in a visual tree format. Helps you understand project structure.
-            In larger projects, consider also using the Glob tool to locate which directories are of interest."""),
+            List the contents of a directory in a visual tree format to understand
+            the project's structure.
+
+            Use this tool for exploration. When you already know approximately what
+            file or directory you're looking for, prefer the Glob tool instead.
+
+            Common cache and dependency directories (such as .git, node_modules,
+            __pycache__, and .venv) are excluded automatically."""),
         input_schema={
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "The directory to list. Defaults to the current directory."
+                    "description": "The directory to list. Defaults to the current directory.",
+                    "default": "."
                 },
                 "depth": {
                     "type": "integer",
@@ -272,10 +378,14 @@ def register_fsearch_tools(registry: ToolRegistry):
                     ),
                     "default": 1
                 },            
-                "ignore": {
+                "exclude": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional list of glob patterns to ignore. Common noise dirs like .git and node_modules are ignored automatically."
+                    "description": (
+                        "Optional glob patterns to exclude from the listing. "
+                        "Useful for skipping additional directories or files. "
+                        "Common cache and dependency directories are already excluded automatically."
+                    )
                 }
             }
         },

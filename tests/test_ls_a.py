@@ -20,7 +20,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
     - files vs directories
     - depth handling
     - sorting
-    - ignore rules
+    - exclude rules
     - directory counts
     - symlinks
     - truncation
@@ -94,7 +94,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl(
             {
                 "path": str(self.base_path),
-                "ignore": "*.txt",
+                "exclude": "*.txt",
             }
         )
 
@@ -107,7 +107,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl(
             {
                 "path": str(self.base_path),
-                "ignore": ["*.txt", 123, None, object()],
+                "exclude": ["*.txt", 123, None, object()],
             }
         )
 
@@ -245,7 +245,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         self.assertLess(apple, zebra)
 
     # ---------------------------------------------------------
-    # IGNORES
+    # EXCLUDES
     # ---------------------------------------------------------
 
     async def test_default_git_ignore(self):
@@ -277,7 +277,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl(
             {
                 "path": str(self.base_path),
-                "ignore": ["*.txt"],
+                "exclude": ["*.txt"],
             }
         )
 
@@ -314,7 +314,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl(
             {
                 "path": str(self.base_path),
-                "ignore": [".gitkeep"],
+                "exclude": [".gitkeep"],
             }
         )
 

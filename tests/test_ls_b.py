@@ -90,7 +90,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path),
-            "ignore": "*.txt"
+            "exclude": "*.txt"
         })
 
         self.assertIn("a.txt", result)
@@ -101,7 +101,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path),
-            "ignore": [
+            "exclude": [
                 "*.py",
                 123,
                 None,
@@ -301,7 +301,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
     #
     # ---------------------------------------------------------
-    # IGNORE RULES
+    # EXCLUDE RULES
     # ---------------------------------------------------------
     #
 
@@ -350,7 +350,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path),
-            "ignore": ["*.log"]
+            "exclude": ["*.log"]
         })
 
         self.assertIn("keep.py", result)
@@ -363,7 +363,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path),
-            "ignore": ["build"]
+            "exclude": ["build"]
         })
 
         self.assertIn("main.py", result)
@@ -376,7 +376,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path),
-            "ignore": ["*.log"]
+            "exclude": ["*.log"]
         })
 
         self.assertIn("src/ (1 item)", result)
@@ -802,7 +802,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path),
-            "ignore": ["*.log", "*.tmp"]
+            "exclude": ["*.log", "*.tmp"]
         })
 
         self.assertIn("keep.py", result)
