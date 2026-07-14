@@ -111,6 +111,9 @@ async def _ls_impl(kwargs: dict[str, Any]) -> ToolReturnType:
     user_ignore = [x for x in raw_ignore if isinstance(x, str)] if isinstance(raw_ignore, list) else []
     ignore_patterns = user_ignore + DEFAULT_IGNORE
 
+    # dedup, just in case
+    ignore_patterns = list(set(ignore_patterns))
+
     # Use .absolute() to preserve symlink context in the LLM's spatial map
     target = Path(path_str).absolute()
 
