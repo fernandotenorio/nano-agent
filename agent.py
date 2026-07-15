@@ -10,6 +10,8 @@ import logging
 
 from config import AppConfig, load_app_config
 from prompts import build_system_prompt
+from sessioncontext import InvocationContext
+
 from typing import Literal
 from typedefs import (
     TextMessageContent, ToolResultMessageContent, ToolUseMessageContent,
@@ -297,9 +299,16 @@ async def main():
 
     if root_dir != cwd:
         print(f"[ROOT: {root_dir}]")
+
+    # 1. Create the context
+    ctx = InvocationContext(
+        workspace=root_dir,
+        cwd=cwd,
+        resume_file=Path(args.resume) if args.resume else None
+    )
     
     # Initialize State
-    registry = create_core_registry()
+    registry = create_core_registry(ctx)
     hooks = HookManager()
     
     bound_hook = partial(initial_setup_hook, app_config=app_config, root=root_dir, cwd=cwd)

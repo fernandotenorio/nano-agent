@@ -7,6 +7,7 @@ from typedefs import ToolFailure
 from textwrap import dedent
 from typing import Any
 from tools.registry import ToolRegistry, ToolReturnType
+from sessioncontext import InvocationContext
 
 MAX_TOKENS: int = 24000
 MAX_FILE_BYTES: int = 256 * 1024
@@ -24,7 +25,7 @@ def format_lines(lines: list[str], offset: int = 1, limit: int = 2000) -> str:
         texts.append(f"{i+1:>5}→{lines[i]}")
     return "\n".join(texts) + ("\n" if len(texts) > 0 else "")
 
-async def _read_impl(kwargs: dict[str, Any]) -> ToolReturnType:
+async def _read_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturnType:
     """Reads a file from disk with size and token safeguards."""
     file_path_str = kwargs.get("file_path")
 
@@ -79,7 +80,7 @@ async def _read_impl(kwargs: dict[str, Any]) -> ToolReturnType:
     return text
 
 
-async def _write_impl(kwargs: dict[str, Any]) -> ToolReturnType:
+async def _write_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturnType:
     """Writes content to a file, enforcing read-before-write for existing files."""
     file_path_str = kwargs.get("file_path")
     content = kwargs.get("content")
@@ -149,7 +150,7 @@ def one_edit_check(file_path: Path, old_content: str, edit: OneEdit) -> str | No
     else:
         return None
 
-async def _edit_impl(kwargs: dict[str, Any]) -> ToolReturnType:
+async def _edit_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturnType:
     """Performs exact string replacements in files."""
     file_path_str = kwargs.get("file_path")
     old_string = kwargs.get("old_string")
@@ -170,7 +171,7 @@ async def _edit_impl(kwargs: dict[str, Any]) -> ToolReturnType:
     
     # 1. Fallback to WRITE
     if error == "WRITE":
-        return await _write_impl({"file_path": file_path_str, "content": new_string})
+        return await _write_impl({"file_path": file_path_str, "content": new_string}, ctx)
 
     # 2. Block on validation errors
     elif error is not None:
@@ -201,7 +202,7 @@ async def _edit_impl(kwargs: dict[str, Any]) -> ToolReturnType:
     return text
 
 
-async def _multiedit_impl(kwargs: dict[str, Any]) -> ToolReturnType:
+async def _multiedit_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturnType:
     """Applies multiple search-and-replace edits to a file sequentially."""
     file_path_str = kwargs.get("file_path")
     edits_data = kwargs.get("edits")
@@ -292,7 +293,7 @@ async def _multiedit_impl(kwargs: dict[str, Any]) -> ToolReturnType:
     return "\n".join(summary_lines)
 
 
-def register_fsystem_tools(registry: ToolRegistry):
+def register_fsystem_tools(registry: ToolRegistry, ctx: InvocationContext):
     registry.register(
         name="Read",
         description=dedent("""\
@@ -317,8 +318,8 @@ def register_fsystem_tools(registry: ToolRegistry):
                 }
             },
             "required": ["file_path"]
-        },
-        func=_read_impl
+        },        
+        func=lambda kwargs: _read_impl(kwargs, ctx)
     )
 
     registry.register(
@@ -342,8 +343,8 @@ def register_fsystem_tools(registry: ToolRegistry):
                 }
             },
             "required": ["file_path", "content"]
-        },
-        func=_write_impl
+        },        
+        func=lambda kwargs: _write_impl(kwargs, ctx)
     )
 
     registry.register(
@@ -378,8 +379,8 @@ def register_fsystem_tools(registry: ToolRegistry):
                 }
             },
             "required": ["file_path", "old_string", "new_string"]
-        },
-        func=_edit_impl
+        },        
+        func=lambda kwargs: _edit_impl(kwargs, ctx)
     )
 
     registry.register(
@@ -429,6 +430,6 @@ def register_fsystem_tools(registry: ToolRegistry):
                 }
             },
             "required": ["file_path", "edits"]
-        },
-        func=_multiedit_impl
+        },        
+        func=lambda kwargs: _multiedit_impl(kwargs, ctx)
     )

@@ -9,6 +9,7 @@ from unittest.mock import patch
 import tools.filesearch as fs
 from tools.filesearch import _ls_impl
 from typedefs import ToolFailure
+from sessioncontext import InvocationContext
 
 # chatgpt
 class TestLsTool(unittest.IsolatedAsyncioTestCase):
@@ -27,6 +28,12 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.test_dir = tempfile.TemporaryDirectory()
         self.base_path = Path(self.test_dir.name).resolve()
+
+        self.ctx = InvocationContext(
+            workspace=self.base_path,
+            cwd=self.base_path,  # Or a subfolder if you want to test relative paths
+            resume_file=None
+        )
 
     def tearDown(self):
         self.test_dir.cleanup()
@@ -51,7 +58,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
     async def test_nonexistent_path(self):
         result = await fs._ls_impl({
             "path": str(self.base_path / "missing")
-        })
+        }, self.ctx)
 
         self.assertIsInstance(result, ToolFailure)
         self.assertIn("Path does not exist", result.error_message)
@@ -64,7 +71,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl({
             "path": str(self.base_path),
             "depth": "abc"
-        })
+        }, self.ctx)
 
         self.assertIsInstance(result, str)
         self.assertIn("src/", result)
@@ -79,7 +86,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl({
             "path": str(self.base_path),
             "depth": None
-        })
+        }, self.ctx)
 
         self.assertIn("src/", result)
         self.assertNotIn("main.py", result)
@@ -91,7 +98,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl({
             "path": str(self.base_path),
             "exclude": "*.txt"
-        })
+        }, self.ctx)
 
         self.assertIn("a.txt", result)
 
@@ -107,7 +114,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
                 None,
                 object()
             ]
-        })
+        }, self.ctx)
 
         self.assertIn("keep.txt", result)
         self.assertNotIn("remove.py", result)
@@ -121,7 +128,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
     async def test_empty_directory(self):
         result = await fs._ls_impl({
             "path": str(self.base_path)
-        })
+        }, self.ctx)
 
         self.assertEqual(
             result.splitlines()[-1],
@@ -133,7 +140,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(f)
-        })
+        }, self.ctx)
 
         self.assertIn(str(self.base_path), result)
         self.assertIn("hello.txt", result)
@@ -145,7 +152,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path)
-        })
+        }, self.ctx)
 
         self.assertIn("a.txt", result)
         self.assertIn("b.txt", result)
@@ -155,7 +162,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path)
-        })
+        }, self.ctx)
 
         first = result.splitlines()[0]
 
@@ -165,7 +172,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
     async def test_root_directory_has_trailing_slash(self):
         result = await fs._ls_impl({
             "path": str(self.base_path)
-        })
+        }, self.ctx)
 
         self.assertTrue(
             result.splitlines()[0].endswith("/")
@@ -183,7 +190,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl({
             "path": str(self.base_path),
             "depth": 0
-        })
+        }, self.ctx)
 
         lines = result.splitlines()
 
@@ -198,7 +205,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl({
             "path": str(self.base_path),
             "depth": 1
-        })
+        }, self.ctx)
 
         self.assertIn("src/", result)
         self.assertNotIn("main.py", result)
@@ -212,7 +219,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl({
             "path": str(self.base_path),
             "depth": 2
-        })
+        }, self.ctx)
 
         self.assertIn("main.py", result)
         self.assertIn("pkg/", result)
@@ -224,7 +231,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl({
             "path": str(self.base_path),
             "depth": -1
-        })
+        }, self.ctx)
 
         self.assertIn("file.txt", result)
 
@@ -240,7 +247,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path)
-        })
+        }, self.ctx)
 
         lines = result.splitlines()[1:]
 
@@ -253,7 +260,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path)
-        })
+        }, self.ctx)
 
         lines = result.splitlines()[1:]
 
@@ -267,7 +274,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path)
-        })
+        }, self.ctx)
 
         files = [
             l for l in result.splitlines()[1:]
@@ -285,7 +292,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path)
-        })
+        }, self.ctx)
 
         self.assertIn("src/ (2 items)", result)
 
@@ -295,7 +302,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path)
-        })
+        }, self.ctx)
 
         self.assertIn("src/ (1 item)", result)
 
@@ -310,7 +317,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         self._create_file(".git/config")
         self._create_file("visible.txt")
 
-        result = await fs._ls_impl({"path": str(self.base_path)})
+        result = await fs._ls_impl({"path": str(self.base_path)}, self.ctx)
 
         self.assertIn("visible.txt", result)
         self.assertNotIn(".git", result)
@@ -320,7 +327,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         self._create_file("node_modules/pkg.json")
         self._create_file("main.py")
 
-        result = await fs._ls_impl({"path": str(self.base_path)})
+        result = await fs._ls_impl({"path": str(self.base_path)}, self.ctx)
 
         self.assertIn("main.py", result)
         self.assertNotIn("node_modules", result)
@@ -330,7 +337,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         self._create_file("__pycache__/mod.pyc")
         self._create_file("main.py")
 
-        result = await fs._ls_impl({"path": str(self.base_path)})
+        result = await fs._ls_impl({"path": str(self.base_path)}, self.ctx)
 
         self.assertIn("main.py", result)
         self.assertNotIn("__pycache__", result)
@@ -339,7 +346,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         self._create_file("good.py")
         self._create_file("bad.pyc")
 
-        result = await fs._ls_impl({"path": str(self.base_path)})
+        result = await fs._ls_impl({"path": str(self.base_path)}, self.ctx)
 
         self.assertIn("good.py", result)
         self.assertNotIn("bad.pyc", result)
@@ -351,7 +358,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl({
             "path": str(self.base_path),
             "exclude": ["*.log"]
-        })
+        }, self.ctx)
 
         self.assertIn("keep.py", result)
         self.assertNotIn("remove.log", result)
@@ -364,7 +371,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl({
             "path": str(self.base_path),
             "exclude": ["build"]
-        })
+        }, self.ctx)
 
         self.assertIn("main.py", result)
         self.assertNotIn("build", result)
@@ -377,7 +384,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl({
             "path": str(self.base_path),
             "exclude": ["*.log"]
-        })
+        }, self.ctx)
 
         self.assertIn("src/ (1 item)", result)
 
@@ -398,7 +405,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl({
             "path": str(self.base_path),
             "depth": 2
-        })
+        }, self.ctx)
 
         self.assertIn("├──", result)
         self.assertIn("│", result) # This will now pass successfully!
@@ -408,7 +415,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path)
-        })
+        }, self.ctx)
 
         self.assertTrue(result.splitlines()[1].startswith("└──"))
 
@@ -420,7 +427,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl({
             "path": str(self.base_path),
             "depth": -1
-        })
+        }, self.ctx)
 
         self.assertIn("file.txt", result)
         self.assertIn("│", result)
@@ -461,7 +468,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(link)
-        })
+        }, self.ctx)
 
         self.assertIn("link.txt ->", result)
         self.assertIn("real.txt", result)
@@ -476,7 +483,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(link)
-        })
+        }, self.ctx)
 
         self.assertIn("broken.txt ->", result)
 
@@ -493,7 +500,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl({
             "path": str(self.base_path),
             "depth": -1
-        })
+        }, self.ctx)
 
         self.assertIn("linked ->", result)
 
@@ -518,7 +525,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         with patch.object(Path, "readlink", autospec=True, side_effect=boom):
             result = await fs._ls_impl({
                 "path": str(link)
-            })
+            }, self.ctx)
 
         self.assertIn("[unreadable link]", result)
 
@@ -534,7 +541,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         with patch("os.scandir", side_effect=PermissionError):
             result = await fs._ls_impl({
                 "path": str(self.base_path)
-            })
+            }, self.ctx)
 
         self.assertIn("src/", result)
         self.assertNotIn("(1 item)", result)
@@ -559,7 +566,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         with patch.object(Path, "iterdir", autospec=True, side_effect=boom):
             result = await fs._ls_impl({
                 "path": str(self.base_path)
-            })
+            }, self.ctx)
 
         self.assertIsInstance(result, str)
         self.assertIn("Unable to read", result)
@@ -577,7 +584,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         with patch.object(Path, "is_dir", autospec=True, side_effect=selective):
             result = await fs._ls_impl({
                 "path": str(self.base_path)
-            })
+            }, self.ctx)
 
         self.assertIn("[unreadable]", result)
 
@@ -599,7 +606,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         with patch.object(Path, "readlink", autospec=True, side_effect=selective):
             result = await fs._ls_impl({
                 "path": str(self.base_path)
-            })
+            }, self.ctx)
 
         self.assertIn("[unreadable link]", result)
 
@@ -622,7 +629,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         with patch.object(Path, "is_dir", autospec=True, side_effect=selective):
             result = await fs._ls_impl({
                 "path": str(self.base_path)
-            })
+            }, self.ctx)
 
         self.assertIn("gone.txt [unreadable]", result)
 
@@ -640,7 +647,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
             result = await fs._ls_impl({
                 "path": str(self.base_path),
                 "depth": 2
-            })
+            }, self.ctx)
 
         self.assertIn("Unable to read", result)
 
@@ -651,7 +658,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         with patch("os.scandir", side_effect=PermissionError):
             result = await fs._ls_impl({
                 "path": str(self.base_path)
-            })
+            }, self.ctx)
 
         self.assertIn("src/", result)
         self.assertIn("root.py", result)
@@ -669,7 +676,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path)
-        })
+        }, self.ctx)
 
         self.assertIn("Results truncated", result)
 
@@ -680,7 +687,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path)
-        })
+        }, self.ctx)
 
         lines = result.splitlines()
 
@@ -698,7 +705,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path)
-        })
+        }, self.ctx)
 
         self.assertEqual(len(result.splitlines()), 2)
 
@@ -707,7 +714,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path)
-        })
+        }, self.ctx)
 
         self.assertIn("main.py", result)
 
@@ -718,7 +725,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path)
-        })
+        }, self.ctx)
 
         self.assertIn("a/", result)
         self.assertIn("b/", result)
@@ -730,7 +737,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl({
             "path": str(self.base_path),
             "depth": -1
-        })
+        }, self.ctx)
 
         self.assertIn("src/", result)
         self.assertIn("pkg/", result)
@@ -744,7 +751,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path)
-        })
+        }, self.ctx)
 
         self.assertIn("a.py", result)
         self.assertIn("b.txt", result)
@@ -758,7 +765,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(self.base_path)
-        })
+        }, self.ctx)
 
         self.assertIn("src/ (1 item)", result)
 
@@ -767,7 +774,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         result = await fs._ls_impl({
             "path": str(f)
-        })
+        }, self.ctx)
 
         self.assertFalse(result.splitlines()[0].endswith("/"))
 
@@ -779,7 +786,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl({
             "path": str(self.base_path),
             "depth": -1
-        })
+        }, self.ctx)
 
         self.assertIsInstance(result, str)
         self.assertIn("dir0/", result)
@@ -791,7 +798,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl({
             "path": str(self.base_path),
             "depth": 2
-        })
+        }, self.ctx)
 
         self.assertIn("empty/", result)
 
@@ -803,7 +810,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await fs._ls_impl({
             "path": str(self.base_path),
             "exclude": ["*.log", "*.tmp"]
-        })
+        }, self.ctx)
 
         self.assertIn("keep.py", result)
         self.assertNotIn("drop.log", result)

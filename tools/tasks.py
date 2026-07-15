@@ -5,7 +5,7 @@ from textwrap import dedent
 from tools.registry import ToolRegistry, ToolReturnType
 from typedefs import AgentCallback, ToolFailure
 from typing import Any
-
+from sessioncontext import InvocationContext
 
 class SubAgentProfile(pydantic.BaseModel):
     type: str
@@ -36,7 +36,7 @@ def get_subagent_system_prompt(profile: SubAgentProfile) -> str:
     """Builds the specific system prompt for a sub-agent."""
     return f"{profile.core_system_prompt}\n\n{get_environment_details()}"
 
-async def _task_impl(kwargs: dict[str, Any]) -> ToolReturnType:
+async def _task_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturnType:
     prompt = kwargs.get("prompt")
     description = kwargs.get("description", "Delegated sub-task")
     subagent_type = kwargs.get("subagent_type", "default-agent")
@@ -59,7 +59,7 @@ async def _task_impl(kwargs: dict[str, Any]) -> ToolReturnType:
         user_content=prompt 
     )
 
-def register_tasks_tools(registry: ToolRegistry):
+def register_tasks_tools(registry: ToolRegistry, ctx: InvocationContext):
     registry.register(
         name="Task",
         description=dedent("""\
@@ -102,6 +102,6 @@ def register_tasks_tools(registry: ToolRegistry):
                 }
             },
             "required": ["description", "prompt", "subagent_type"]
-        },
-        func=_task_impl
+        },        
+        func=lambda kwargs: _task_impl(kwargs, ctx)
     )

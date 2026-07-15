@@ -1,11 +1,13 @@
 import unittest
 from unittest.mock import patch, MagicMock
+from pathlib import Path
 
 # Import the target module functions and state
 from tools.tasks import (
     _task_impl, register_tasks_tools, get_subagent_system_prompt, _SUB_AGENTS
 )
 from typedefs import ToolFailure, AgentCallback
+from sessioncontext import InvocationContext
 
 
 class TestSubAgentTasks(unittest.IsolatedAsyncioTestCase):
@@ -15,19 +17,26 @@ class TestSubAgentTasks(unittest.IsolatedAsyncioTestCase):
     and dynamic LLM schema generation.
     """
 
+    def setUp(self):
+        self.ctx = InvocationContext(
+            workspace=Path("/dummy/workspace"),
+            cwd=Path("/dummy/workspace"),
+            resume_file=None
+        )
+
     # ---------------------------------------------------------
     # GROUP 1: Validation & Error Handling
     # ---------------------------------------------------------
 
     async def test_missing_prompt(self):
         """Test 1.1: Task safely rejects if 'prompt' is missing."""
-        result = await _task_impl({"subagent_type": "default-agent"})
+        result = await _task_impl({"subagent_type": "default-agent"}, self.ctx)
         self.assertIsInstance(result, ToolFailure)
         self.assertIn("prompt is required", result.error_message)
 
     async def test_unrecognized_subagent_type(self):
         """Test 1.2: Task rejects invalid types and dynamically lists valid ones."""
-        result = await _task_impl({"prompt": "do work", "subagent_type": "hacker-agent"})
+        result = await _task_impl({"prompt": "do work", "subagent_type": "hacker-agent"}, self.ctx)
         self.assertIsInstance(result, ToolFailure)
         self.assertIn("not recognized", result.error_message)
         
@@ -37,7 +46,7 @@ class TestSubAgentTasks(unittest.IsolatedAsyncioTestCase):
 
     async def test_whitespace_prompt(self):
         """Test 1.3: Task safely rejects prompts that are just whitespace."""
-        result = await _task_impl({"prompt": "   ", "subagent_type": "default-agent"})
+        result = await _task_impl({"prompt": "   ", "subagent_type": "default-agent"}, self.ctx)
         self.assertIsInstance(result, ToolFailure)
         self.assertIn("prompt is required", result.error_message)
 
@@ -52,7 +61,7 @@ class TestSubAgentTasks(unittest.IsolatedAsyncioTestCase):
         # Ensure no AGENTS.md interference
         mock_path.return_value.exists.return_value = False
         
-        result = await _task_impl({"prompt": "Explore the code."})
+        result = await _task_impl({"prompt": "Explore the code."}, self.ctx)
         
         self.assertIsInstance(result, AgentCallback)
         self.assertEqual(result.subagent_type, "default-agent")
@@ -69,7 +78,7 @@ class TestSubAgentTasks(unittest.IsolatedAsyncioTestCase):
             "prompt": "Review PR", 
             "subagent_type": "code-reviewer",
             "description": "Checking for security bugs"
-        })
+        }, self.ctx)
         
         self.assertIsInstance(result, AgentCallback)
         self.assertEqual(result.subagent_type, "code-reviewer")
@@ -103,7 +112,7 @@ class TestSubAgentTasks(unittest.IsolatedAsyncioTestCase):
         """Test 5.1: The registry description dynamically advertises all available profiles."""
         mock_registry = MagicMock()
         
-        register_tasks_tools(mock_registry)
+        register_tasks_tools(mock_registry, self.ctx)
         
         mock_registry.register.assert_called_once()
         
@@ -124,7 +133,7 @@ class TestSubAgentTasks(unittest.IsolatedAsyncioTestCase):
     def test_schema_required_properties(self):
         """Test 5.2: The tool schema strictly enforces required arguments."""
         mock_registry = MagicMock()
-        register_tasks_tools(mock_registry)
+        register_tasks_tools(mock_registry, self.ctx)
         
         call_kwargs = mock_registry.register.call_args[1]
         schema = call_kwargs["input_schema"]

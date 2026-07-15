@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 # Adjust import paths depending on your exact project structure
+from sessioncontext import InvocationContext
 import tools.filesearch as fs
 from tools.filesearch import _glob_impl
 from typedefs import ToolFailure
@@ -22,6 +23,12 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
         # Create a real temporary directory for safe file I/O testing
         self.test_dir = tempfile.TemporaryDirectory()
         self.base_path = Path(self.test_dir.name).resolve()
+
+        self.ctx = InvocationContext(
+            workspace=self.base_path,
+            cwd=self.base_path,  # Or a subfolder if you want to test relative paths
+            resume_file=None
+        )
 
     def tearDown(self):
         self.test_dir.cleanup()
@@ -43,25 +50,25 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
     # ---------------------------------------------------------
 
     async def test_missing_pattern(self):
-        result = await _glob_impl({"path": str(self.base_path)})
+        result = await _glob_impl({"path": str(self.base_path)}, self.ctx)
         self.assertIsInstance(result, ToolFailure)
         self.assertIn("pattern is required", result.error_message)
 
     async def test_invalid_path(self):
         bad_path = self.base_path / "does_not_exist"
-        result = await _glob_impl({"pattern": "*.txt", "path": str(bad_path)})
+        result = await _glob_impl({"pattern": "*.txt", "path": str(bad_path)}, self.ctx)
         self.assertIsInstance(result, ToolFailure)
         self.assertIn("Directory does not exist", result.error_message)
 
     async def test_file_instead_of_directory_path(self):
         file_path = self._create_file("target.txt")
-        result = await _glob_impl({"pattern": "*.txt", "path": str(file_path)})
+        result = await _glob_impl({"pattern": "*.txt", "path": str(file_path)}, self.ctx)
         self.assertIsInstance(result, ToolFailure)
         self.assertIn("is not a valid directory", result.error_message)
 
     async def test_no_files_found(self):
         self._create_file("script.py")
-        result = await _glob_impl({"pattern": "*.txt", "path": str(self.base_path)})
+        result = await _glob_impl({"pattern": "*.txt", "path": str(self.base_path)}, self.ctx)
         self.assertIsInstance(result, str)
         self.assertEqual(result, "No files found.")
 
@@ -74,7 +81,7 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
         file2 = self._create_file("b.txt")
         self._create_file("c.py")
 
-        result = await _glob_impl({"pattern": "*.txt", "path": str(self.base_path)})
+        result = await _glob_impl({"pattern": "*.txt", "path": str(self.base_path)}, self.ctx)
         self.assertIsInstance(result, str)
         self.assertIn(str(file1), result)
         self.assertIn(str(file2), result)
@@ -86,7 +93,7 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
         file3 = self._create_file("nested/deep/level2.txt")
         self._create_file("nested/deep/ignore.py")
 
-        result = await _glob_impl({"pattern": "**/*.txt", "path": str(self.base_path)})
+        result = await _glob_impl({"pattern": "**/*.txt", "path": str(self.base_path)}, self.ctx)
         self.assertIsInstance(result, str)
         self.assertIn(str(file1), result)
         self.assertIn(str(file2), result)
@@ -98,7 +105,7 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
         file_ts = self._create_file("app.ts")
         file_py = self._create_file("app.py")
 
-        result = await _glob_impl({"pattern": "*.{js,ts}", "path": str(self.base_path)})
+        result = await _glob_impl({"pattern": "*.{js,ts}", "path": str(self.base_path)}, self.ctx)
         self.assertIsInstance(result, str)
         self.assertIn(str(file_js), result)
         self.assertIn(str(file_ts), result)
@@ -109,7 +116,7 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
         file2 = self._create_file("src/b/main.ts")
         self._create_file("src/c/main.js")
 
-        result = await _glob_impl({"pattern": "src/{a,b}/*.{js,ts}", "path": str(self.base_path)})
+        result = await _glob_impl({"pattern": "src/{a,b}/*.{js,ts}", "path": str(self.base_path)}, self.ctx)
         self.assertIsInstance(result, str)
         self.assertIn(str(file1), result)
         self.assertIn(str(file2), result)
@@ -120,7 +127,7 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
         # The set() should deduplicate it.
         file1 = self._create_file("a.txt")
         
-        result = await _glob_impl({"pattern": "{*,*.txt}", "path": str(self.base_path)})
+        result = await _glob_impl({"pattern": "{*,*.txt}", "path": str(self.base_path)}, self.ctx)
         self.assertIsInstance(result, str)
         
         # Count occurrences of the file path in the result string
@@ -137,7 +144,7 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
         middle = self._create_file("2_middle.txt", age_seconds=50)
         newest = self._create_file("1_newest.txt", age_seconds=0)
 
-        result = await _glob_impl({"pattern": "*.txt", "path": str(self.base_path)})
+        result = await _glob_impl({"pattern": "*.txt", "path": str(self.base_path)}, self.ctx)
         self.assertIsInstance(result, str)
         
         lines = result.split("\n")
@@ -154,7 +161,7 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
         newest2 = self._create_file("b.txt", age_seconds=20)
         oldest3 = self._create_file("c.txt", age_seconds=30)
 
-        result = await _glob_impl({"pattern": "*.txt", "path": str(self.base_path)})
+        result = await _glob_impl({"pattern": "*.txt", "path": str(self.base_path)}, self.ctx)
         self.assertIsInstance(result, str)
         
         lines = result.split("\n")
@@ -192,7 +199,7 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
 
         # 3. Patch Path.stat with our intelligent selective function
         with patch("pathlib.Path.stat", autospec=True, side_effect=selective_stat):
-            result = await _glob_impl({"pattern": "*.txt", "path": str(self.base_path)})
+            result = await _glob_impl({"pattern": "*.txt", "path": str(self.base_path)}, self.ctx)
             
         self.assertIsInstance(result, str)
         

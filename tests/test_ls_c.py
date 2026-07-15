@@ -7,6 +7,7 @@ from unittest.mock import patch
 # Adjust import paths depending on your exact project structure
 from tools.filesearch import _ls_impl
 from typedefs import ToolFailure
+from sessioncontext import InvocationContext
 
 # gemini 3.1-pro
 class TestLsTool(unittest.IsolatedAsyncioTestCase):
@@ -19,6 +20,12 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.test_dir = tempfile.TemporaryDirectory()
         self.base_path = Path(self.test_dir.name).resolve()
+
+        self.ctx = InvocationContext(
+            workspace=self.base_path,
+            cwd=self.base_path,  # Or a subfolder if you want to test relative paths
+            resume_file=None
+        )
 
     def tearDown(self):
         self.test_dir.cleanup()
@@ -53,21 +60,21 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
     async def test_nonexistent_path(self):
         bad_path = self.base_path / "nowhere"
-        result = await _ls_impl({"path": str(bad_path)})
+        result = await _ls_impl({"path": str(bad_path)}, self.ctx)
         self.assertIsInstance(result, ToolFailure)
         self.assertIn("Path does not exist", result.error_message)
 
     async def test_invalid_depth_type(self):
         self._create_file("test.txt")
         # Pass a bad depth string; it should gracefully fallback to depth=1
-        result = await _ls_impl({"path": str(self.base_path), "depth": "not_an_int"})
+        result = await _ls_impl({"path": str(self.base_path), "depth": "not_an_int"}, self.ctx)
         self.assertIsInstance(result, str)
         self.assertIn("test.txt", result)
 
     async def test_invalid_ignore_type(self):
         self._create_file("test.txt")
         # Pass garbage into the ignore list
-        result = await _ls_impl({"path": str(self.base_path), "exclude": [123, None, {"bad": "type"}]})
+        result = await _ls_impl({"path": str(self.base_path), "exclude": [123, None, {"bad": "type"}]}, self.ctx)
         self.assertIsInstance(result, str)
         self.assertIn("test.txt", result)
 
@@ -76,7 +83,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
     # ---------------------------------------------------------
 
     async def test_empty_directory(self):
-        result = await _ls_impl({"path": str(self.base_path)})
+        result = await _ls_impl({"path": str(self.base_path)}, self.ctx)
         self.assertIsInstance(result, str)
         self.assertIn("[Empty Directory]", result)
 
@@ -89,7 +96,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         self._create_file("Z.txt")
         self._create_file("c.txt")
 
-        result = await _ls_impl({"path": str(self.base_path)})
+        result = await _ls_impl({"path": str(self.base_path)}, self.ctx)
         self.assertIsInstance(result, str)
         
         lines = result.split("\n")
@@ -108,7 +115,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
     async def test_target_is_file(self):
         file_path = self._create_file("target.txt")
-        result = await _ls_impl({"path": str(file_path)})
+        result = await _ls_impl({"path": str(file_path)}, self.ctx)
         self.assertIsInstance(result, str)
         # self.assertIn("Listing:", result)
         self.assertIn("└── target.txt", result)
@@ -119,21 +126,21 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
     async def test_depth_zero(self):
         self._create_file("child.txt")
-        result = await _ls_impl({"path": str(self.base_path), "depth": 0})
+        result = await _ls_impl({"path": str(self.base_path), "depth": 0}, self.ctx)
         self.assertIsInstance(result, str)
         self.assertIn("(depth limit reached)", result)
         self.assertNotIn("child.txt", result)
 
     async def test_depth_one_default(self):
         self._create_file("child/grandchild.txt")
-        result = await _ls_impl({"path": str(self.base_path)})
+        result = await _ls_impl({"path": str(self.base_path)}, self.ctx)
         self.assertIsInstance(result, str)
         self.assertIn("child/ (1 item)", result)
         self.assertNotIn("grandchild.txt", result) # Should not recurse to 2nd level
 
     async def test_depth_unlimited(self):
         self._create_file("child/grandchild/great_grandchild.txt")
-        result = await _ls_impl({"path": str(self.base_path), "depth": -1})
+        result = await _ls_impl({"path": str(self.base_path), "depth": -1}, self.ctx)
         self.assertIsInstance(result, str)
         self.assertIn("child/ (1 item)", result)
         self.assertIn("grandchild/ (1 item)", result)
@@ -149,7 +156,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         self._create_file("__pycache__/app.pyc")
         self._create_file("normal.txt")
 
-        result = await _ls_impl({"path": str(self.base_path)})
+        result = await _ls_impl({"path": str(self.base_path)}, self.ctx)
         self.assertIsInstance(result, str)
         self.assertIn("normal.txt", result)
         self.assertNotIn(".git", result)
@@ -165,7 +172,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         result = await _ls_impl({
             "path": str(self.base_path), 
             "exclude": ["*.log", "temp_*"]
-        })
+        }, self.ctx)
         self.assertIsInstance(result, str)
         self.assertIn("keep.txt", result)
         self.assertNotIn("app.log", result)
@@ -180,7 +187,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         self._create_file("real_file.txt")
         symlink = self._create_symlink("link.txt", "real_file.txt")
         
-        result = await _ls_impl({"path": str(symlink)})
+        result = await _ls_impl({"path": str(symlink)}, self.ctx)
         self.assertIsInstance(result, str)
         self.assertIn("link.txt ->", result)
         self.assertIn("real_file.txt", result)
@@ -192,7 +199,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         self._create_symlink("link_to_file.txt", "data/real_file.txt")
         self._create_symlink("link_to_dir", "real_dir")
 
-        result = await _ls_impl({"path": str(self.base_path)})
+        result = await _ls_impl({"path": str(self.base_path)}, self.ctx)
         self.assertIsInstance(result, str)
         
         # Symlinks should both be treated as files (no trailing slash, has arrow)
@@ -205,7 +212,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         # Target does not exist
         self._create_symlink("broken_link.txt", "does_not_exist.txt")
         
-        result = await _ls_impl({"path": str(self.base_path)})
+        result = await _ls_impl({"path": str(self.base_path)}, self.ctx)
         self.assertIsInstance(result, str)
         self.assertIn("broken_link.txt ->", result)
         self.assertNotIn("ToolFailure", str(type(result)))
@@ -226,7 +233,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         with patch("pathlib.Path.iterdir", autospec=True, side_effect=selective_iterdir):
             # Tell it to recurse to hit the restricted directory's iterdir
-            result = await _ls_impl({"path": str(self.base_path), "depth": 2})
+            result = await _ls_impl({"path": str(self.base_path), "depth": 2}, self.ctx)
 
         self.assertIsInstance(result, str)
         self.assertIn("restricted_dir/", result)
@@ -245,7 +252,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         # Patch `is_symlink` since it's the first stat check in `generate_tree`
         with patch("pathlib.Path.is_symlink", autospec=True, side_effect=selective_is_symlink):
-            result = await _ls_impl({"path": str(self.base_path)})
+            result = await _ls_impl({"path": str(self.base_path)}, self.ctx)
 
         self.assertIsInstance(result, str)
         self.assertIn("normal_file.txt", result)
@@ -261,7 +268,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         for i in range(5):
             self._create_file(f"file_{i}.txt")
             
-        result = await _ls_impl({"path": str(self.base_path)})
+        result = await _ls_impl({"path": str(self.base_path)}, self.ctx)
         self.assertIsInstance(result, str)
         
         lines = result.split("\n")

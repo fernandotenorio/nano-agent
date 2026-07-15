@@ -11,6 +11,7 @@ from textwrap import dedent
 from tools.registry import ToolRegistry, ToolReturnType
 from typing import Any, Iterator
 from typedefs import ToolFailure
+from sessioncontext import InvocationContext
 
 from wcmatch import glob
 
@@ -46,7 +47,7 @@ DEFAULT_GLOB_EXCLUDE_PATTERNS = (
     + [f"**/{p}" for p in EXCLUDED_FILE_PATTERNS]
 )
 
-async def _glob_impl(kwargs: dict[str, Any]) -> ToolReturnType:
+async def _glob_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturnType:
     """Search for files using glob patterns, returning newest files first."""
 
     pattern = kwargs.get("pattern")
@@ -173,7 +174,7 @@ async def _glob_impl(kwargs: dict[str, Any]) -> ToolReturnType:
     return "\n".join(lines)
 
 
-async def _ls_impl(kwargs: dict[str, Any]) -> ToolReturnType:
+async def _ls_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturnType:
     """Lists directory contents with a visual tree structure."""
     path_str = kwargs.get("path", ".")
     
@@ -306,7 +307,7 @@ async def _ls_impl(kwargs: dict[str, Any]) -> ToolReturnType:
     return "\n".join(lines)
 
 
-def register_fsearch_tools(registry: ToolRegistry):
+def register_fsearch_tools(registry: ToolRegistry, ctx: InvocationContext):
     registry.register(
         name="Glob",
         description=dedent("""\
@@ -344,8 +345,8 @@ def register_fsearch_tools(registry: ToolRegistry):
                 }
             },
             "required": ["pattern"]
-        },
-        func=_glob_impl
+        },        
+        func=lambda kwargs: _glob_impl(kwargs, ctx)
     )
 
     registry.register(
@@ -388,6 +389,7 @@ def register_fsearch_tools(registry: ToolRegistry):
                     )
                 }
             }
-        },
-        func=_ls_impl
+        },        
+        
+        func=lambda kwargs: _ls_impl(kwargs, ctx)
     )

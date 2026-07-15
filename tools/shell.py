@@ -1,9 +1,10 @@
 from tools.registry import ToolRegistry, ToolReturnType
 from typedefs import ShellCallback, ToolFailure
+from sessioncontext import InvocationContext
 from typing import Any
 from textwrap import dedent
 
-async def _bash_impl(kwargs: dict[str, Any]) -> ToolReturnType:
+async def _bash_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturnType:
     """Instructs the loop to run a bash command."""
     command = kwargs.get("command")
 
@@ -25,7 +26,7 @@ async def _bash_impl(kwargs: dict[str, Any]) -> ToolReturnType:
     )
 
 
-def register_shell_tools(registry: ToolRegistry):
+def register_shell_tools(registry: ToolRegistry, ctx: InvocationContext):
     registry.register(
         name="Shell",
         description=dedent("""\
@@ -64,6 +65,6 @@ def register_shell_tools(registry: ToolRegistry):
                 }
             },
             "required": ["command"]
-        },
-        func=_bash_impl
+        },        
+        func=lambda kwargs: _bash_impl(kwargs, ctx)
     )
