@@ -433,15 +433,15 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
     async def test_unreadable_entry_during_enumeration(self):
         self._create_file("a.txt")
 
-        original_is_symlink = Path.is_symlink
+        original_is_dir = Path.is_dir
 
         def selective_failure(path_obj):
             if path_obj.name == "a.txt":
                 raise OSError("boom")
-            return original_is_symlink(path_obj)
+            return original_is_dir(path_obj)
 
         with patch(
-            "pathlib.Path.is_symlink",
+            "pathlib.Path.is_dir",
             autospec=True,
             side_effect=selective_failure
         ):
@@ -449,7 +449,6 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
                 {"path": str(self.base_path)},
                 self.ctx
             )
-
         self.assertIn("[unreadable]", result)
 
     async def test_unreadable_symlink_target(self):
