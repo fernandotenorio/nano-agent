@@ -325,14 +325,13 @@ def register_fsearch_tools(registry: ToolRegistry, ctx: InvocationContext):
     registry.register(
         name="Glob",
         description=dedent("""\
-            Search for files using advanced glob patterns. 
+            Search for files using glob patterns.
             Supports:
               - Recursive directory search (using `**`)
               - Single-character matching (using `?`)
               - Range/character matching (e.g. `[a-z]`, `[!0-9]`)
               - Brace expansion (e.g. `src/{a,b}/*.js`)
-              - Hidden file matching (dotfiles like `.env` are matched automatically)
-              - Extended glob patterns (e.g. `!(test)/**/*.js` to exclude, or `@(index|about).html` to isolate).
+              - Hidden file matching (dotfiles like `.env` are matched automatically)              
 
             Use this when searching by file name, as it avoids reading
             file contents and is significantly more efficient.

@@ -404,5 +404,47 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
         result_exact = await _glob_impl({"pattern": "test_dir", "path": str(self.base_path)}, self.ctx)
         self.assertEqual(result_exact, "No files found.")
 
+    # ---------------------------------------------------------
+    # STANDARD GLOB FEATURES (?, []) - NO EXTRA FLAGS NEEDED
+    # ---------------------------------------------------------
+
+    async def test_single_character_wildcard(self):
+        """Ensure '?' matches exactly one character (standard glob behavior)."""
+        self._create_file("script_a.py")
+        self._create_file("script_b.py")
+        self._create_file("script_12.py") # Two chars after _, should not match
+
+        result = await _glob_impl({"pattern": "script_?.py", "path": str(self.base_path)}, self.ctx)
+        
+        self.assertIsInstance(result, str)
+        self.assertIn("script_a.py", result)
+        self.assertIn("script_b.py", result)
+        self.assertNotIn("script_12.py", result)
+
+    async def test_character_classes(self):
+        """Ensure '[a-z]' and '[0-9]' matching works correctly (standard glob behavior)."""
+        self._create_file("image_01.png")
+        self._create_file("image_02.png")
+        self._create_file("image_xx.png")
+
+        result = await _glob_impl({"pattern": "image_[0-9][0-9].png", "path": str(self.base_path)}, self.ctx)
+        
+        self.assertIsInstance(result, str)
+        self.assertIn("image_01.png", result)
+        self.assertIn("image_02.png", result)
+        self.assertNotIn("image_xx.png", result)
+
+    async def test_character_class_negation(self):
+        """Ensure '[!a-z]' negation works (standard glob behavior)."""
+        self._create_file("item_1.txt")
+        self._create_file("item_a.txt")
+
+        # [!a-z] means any character that is NOT a lowercase letter
+        result = await _glob_impl({"pattern": "item_[!a-z].txt", "path": str(self.base_path)}, self.ctx)
+        
+        self.assertIsInstance(result, str)
+        self.assertIn("item_1.txt", result)
+        self.assertNotIn("item_a.txt", result)
+
 if __name__ == "__main__":
     unittest.main()
