@@ -244,7 +244,7 @@ def get_transcript_path(app_config: AppConfig, cwd: Path, resume_arg: str | None
 async def main():
     # Get app config
     app_config = load_app_config()
-    cwd = Path.cwd()
+    cwd = Path.cwd().resolve()
     
     # Parse Command Line Arguments
     parser = argparse.ArgumentParser(description=f"{app_config.app_name.capitalize()} Code Agent")

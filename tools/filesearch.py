@@ -8,6 +8,7 @@ import glob
 import itertools
 from pathlib import Path
 from textwrap import dedent
+from tools.ignore import IgnoreMatcher
 from tools.registry import ToolRegistry, ToolReturnType
 from typing import Any, Iterator
 from typedefs import ToolFailure
@@ -25,18 +26,13 @@ EXCLUDED_DIRS = [
     ".venv",
     "venv",
     ".idea",
-    ".vscode",
+    ".vscode"
 ]
 
 EXCLUDED_FILE_PATTERNS = [
     "*.pyc",
     "*.pyo",
 ]
-
-DEFAULT_LS_EXCLUDE = (
-    EXCLUDED_DIRS +
-    EXCLUDED_FILE_PATTERNS
-)
 
 DEFAULT_GLOB_EXCLUDE_PATTERNS = (
     [
@@ -193,10 +189,9 @@ async def _ls_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturn
     raw_ignore = kwargs.get("exclude")
     # Defensively ensure all ignore patterns are actually strings
     user_ignore = [x for x in raw_ignore if isinstance(x, str)] if isinstance(raw_ignore, list) else []
-    ignore_patterns = user_ignore + DEFAULT_LS_EXCLUDE
 
-    # dedup, just in case
-    ignore_patterns = list(set(ignore_patterns))
+    # Initialize the ignore matcher using workspace context
+    matcher = IgnoreMatcher(workspace=ctx.workspace, extra_patterns=user_ignore)
 
     # Use .absolute() to preserve symlink context in the LLM's spatial map
     target = Path(path_str).absolute()
@@ -205,8 +200,15 @@ async def _ls_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturn
     if not target.exists() and not target.is_symlink():
         return ToolFailure(error_message=f"Error: Path does not exist: {target}")
 
-    def should_ignore(name: str) -> bool:
-        return any(fnmatch.fnmatch(name, pat) for pat in ignore_patterns)
+    # review this
+    def should_ignore(p: Path, is_d: bool) -> bool:
+        try:
+            rel_path = p.absolute().relative_to(ctx.workspace.absolute())
+            return matcher.ignores_relative(rel_path.as_posix(), is_dir=is_d)
+        except ValueError:
+            # If the path being listed is completely outside the workspace,
+            # we default to not ignoring it.
+            return False
 
     # Root Node Symlink & File Handling
     # If it's a file, a file-symlink, or a broken symlink, return a leaf node.
@@ -226,9 +228,19 @@ async def _ls_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturn
         """Safely count non-ignored items in a directory using os.scandir."""
         try:
             with os.scandir(dir_path) as it:
-                count = sum(1 for entry in it if not should_ignore(entry.name))
+                count = 0
+                for entry in it:
+                    try:
+                        is_sym = entry.is_symlink()
+                        is_d = False if is_sym else entry.is_dir()
+                        if not should_ignore(Path(entry.path), is_d):
+                            count += 1
+                    except OSError:
+                        # If a single file becomes unreadable or disappears, just skip it
+                        continue
             return f" ({count} items)" if count != 1 else " (1 item)"
         except OSError:
+            # Triggered if the directory itself cannot be read (e.g. permission denied)
             return ""
 
     def generate_tree(current_path: Path, prefix: str = '', level: int = -1) -> Iterator[str]:
@@ -243,15 +255,15 @@ async def _ls_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturn
 
         # Pre-compute stats safely to avoid TOCTOU races and mid-sort crashes
         entries = []
-        for p in all_items:
-            if should_ignore(p.name):
-                continue
-            
+        for p in all_items:           
             try:
                 # Stat optimization: if it's a symlink, treat it as a file (is_d = False)
                 # This saves an expensive is_dir() stat call and groups symlinks cleanly.
                 is_p_sym = p.is_symlink()
                 is_d = False if is_p_sym else p.is_dir()
+
+                if should_ignore(p, is_d):
+                    continue
                 
                 if is_p_sym:
                     try:
