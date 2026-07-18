@@ -509,16 +509,15 @@ class TestLsIgnoreLogic(unittest.IsolatedAsyncioTestCase):
             self.ctx,
         )
 
-        # Real directory is visible
+        self.assertIn("node_modules_link ->", result)
+
+        # real directory is shown
         self.assertIn("real_node_modules", result)
         self.assertIn("package.json", result)
 
-        # Symlink is shown as a leaf
-        self.assertIn("node_modules_link ->", result)
-
-        # But it was not expanded
+        # symlink target is not expanded
         self.assertNotIn(
-            "node_modules_link/\n",
+            "node_modules_link/",
             result,
         )
 

@@ -230,11 +230,12 @@ async def _ls_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturn
             with os.scandir(dir_path) as it:
                 count = 0
                 for entry in it:
-                    try:
-                        is_sym = entry.is_symlink()
-                        is_d = False if is_sym else entry.is_dir()
-                        if not should_ignore(Path(entry.path), is_d):
-                            count += 1
+                    try:                       
+                        entry_path = Path(entry.path)
+                        is_d, is_sym = entry_type(entry_path)
+                        if not should_ignore(entry_path, is_d):
+                            count+= 1
+
                     except OSError:
                         # If a single file becomes unreadable or disappears, just skip it
                         continue
@@ -243,6 +244,16 @@ async def _ls_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturn
             # Triggered if the directory itself cannot be read (e.g. permission denied)
             return ""
 
+    def entry_type(path: Path) -> tuple[bool, bool]:
+        """
+        Returns:
+            (is_directory, is_symlink)
+
+        Symlink targets are inspected for type detection, but symlinks are
+        never followed during recursion.
+        """
+        return path.is_dir(), path.is_symlink()
+        
     def generate_tree(current_path: Path, prefix: str = '', level: int = -1) -> Iterator[str]:
         if level == 0:
             return
@@ -260,7 +271,7 @@ async def _ls_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturn
                 # Stat optimization: if it's a symlink, treat it as a file (is_d = False)
                 # This saves an expensive is_dir() stat call and groups symlinks cleanly.
                 is_p_sym = p.is_symlink()
-                is_d = False if is_p_sym else p.is_dir()
+                is_d, _ = entry_type(p)
 
                 if should_ignore(p, is_d):
                     continue
@@ -288,10 +299,10 @@ async def _ls_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturn
             pointer = "└── " if i == last else "├── "
             yield prefix + pointer + display
 
-            # We safely recurse because symlinks are guaranteed is_d=False
-            if is_d:
+            # We safely recurse because symlinks are guaranteed is_d=False            
+            if is_d and not path.is_symlink():
                 extension = '│   ' if i != last else '    '
-                yield from generate_tree(path, prefix=prefix+extension, level=level-1)
+                yield from generate_tree(path, prefix=prefix + extension, level=level - 1)
 
     # Provide explicit root context for the LLM's filesystem map
     target_display = f"{target}/" if target.is_dir() else str(target)

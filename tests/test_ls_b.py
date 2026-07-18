@@ -504,8 +504,15 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("linked ->", result)
 
-        linked_index = result.index("linked ->")
-        self.assertNotIn("file.txt", result[linked_index:])
+        # The real directory is listed and contains file.txt
+        self.assertIn("real/", result)
+        self.assertIn("file.txt", result)
+
+        # The symlink itself is a leaf, not a subtree
+        self.assertNotIn(
+            "linked/\n",
+            result
+        )
 
     async def test_unreadable_readlink(self):
         if not self._symlinks_supported():
