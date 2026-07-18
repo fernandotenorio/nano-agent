@@ -4,7 +4,6 @@ import re
 import os
 import heapq
 import fnmatch
-import glob
 import itertools
 from pathlib import Path
 from textwrap import dedent
@@ -13,35 +12,11 @@ from tools.registry import ToolRegistry, ToolReturnType
 from typing import Any, Iterator
 from typedefs import ToolFailure
 from sessioncontext import InvocationContext
-
 from wcmatch import glob
 
 MAX_GLOB_RESULTS: int = 100
 MAX_LS_ENTRIES: int = 400
 
-EXCLUDED_DIRS = [
-    ".git",
-    "__pycache__",
-    "node_modules",
-    ".venv",
-    "venv",
-    ".idea",
-    ".vscode"
-]
-
-EXCLUDED_FILE_PATTERNS = [
-    "*.pyc",
-    "*.pyo",
-]
-
-DEFAULT_GLOB_EXCLUDE_PATTERNS = (
-    [
-        pattern
-        for d in EXCLUDED_DIRS
-        for pattern in (f"{d}/**", f"**/{d}/**")
-    ]
-    + [f"**/{p}" for p in EXCLUDED_FILE_PATTERNS]
-)
 
 async def _glob_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturnType:
     """Search for files using glob patterns, returning newest files first."""
@@ -67,15 +42,19 @@ async def _glob_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
         )
 
     raw_exclude = kwargs.get("exclude")
+
+    # Defensively handle the case where the LLM passes a single string instead of a list
     if isinstance(raw_exclude, str):
         raw_exclude = [raw_exclude]
+
     user_exclude = (
         [x for x in raw_exclude if isinstance(x, str)]
         if isinstance(raw_exclude, list)
         else []
     )
 
-    exclude_patterns = list(dict.fromkeys(DEFAULT_GLOB_EXCLUDE_PATTERNS + user_exclude))
+    # Initialize the ignore matcher using workspace context
+    ignore_matcher = IgnoreMatcher(workspace=ctx.workspace, extra_patterns=user_exclude)
 
     flags = (
         glob.GLOBSTAR |
@@ -84,17 +63,21 @@ async def _glob_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
     )
 
     try:
-        matcher = glob.compile(pattern, flags=flags)
-        exclude_matcher = (
-            glob.compile(exclude_patterns, flags=flags)
-            if exclude_patterns
-            else None
-        )
+        search_matcher = glob.compile(pattern, flags=flags)
     except Exception as e:
         return ToolFailure(error_message=f"Error: invalid glob pattern: {e}")
 
     heap: list[tuple[float, str]] = []
     total_matches = 0
+
+    def should_ignore(p: Path, is_d: bool) -> bool:
+        try:
+            rel_path = p.absolute().relative_to(ctx.workspace.absolute())
+            return ignore_matcher.ignores_relative(rel_path.as_posix(), is_dir=is_d)
+        except ValueError:
+            # If the path being listed is completely outside the workspace,
+            # we default to not ignoring it.
+            return False
 
     def walk_iterative(start: Path) -> None:
         nonlocal total_matches
@@ -109,6 +92,7 @@ async def _glob_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
 
                         rel_path = os.path.relpath(entry.path, base_path)
                         rel_path = rel_path.replace(os.sep, "/")
+                        entry_path = Path(entry.path)
 
                         try:
                             is_symlink = entry.is_symlink()
@@ -120,9 +104,9 @@ async def _glob_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
 
                         try:
                             if entry.is_dir(follow_symlinks=False):
-                                if exclude_matcher and exclude_matcher.match(rel_path + "/"):
+                                if should_ignore(entry_path, True):
                                     continue
-                                stack.append(Path(entry.path))
+                                stack.append(entry_path)
                                 continue
 
                             if not entry.is_file(follow_symlinks=False):
@@ -131,10 +115,12 @@ async def _glob_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
                         except OSError:
                             continue
 
-                        if exclude_matcher and exclude_matcher.match(rel_path):
+                        # Check if the file itself should be ignored
+                        if should_ignore(entry_path, False):
                             continue
 
-                        if not matcher.match(rel_path):
+                        # Check if it matches the glob pattern
+                        if not search_matcher.match(rel_path):
                             continue
 
                         try:
@@ -187,6 +173,11 @@ async def _ls_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturn
     target_level = depth if depth >= 0 else -1
     
     raw_ignore = kwargs.get("exclude")
+
+    # Defensively handle the case where the LLM passes a single string instead of a list
+    if isinstance(raw_ignore, str):
+        raw_ignore = [raw_ignore]
+
     # Defensively ensure all ignore patterns are actually strings
     user_ignore = [x for x in raw_ignore if isinstance(x, str)] if isinstance(raw_ignore, list) else []
 

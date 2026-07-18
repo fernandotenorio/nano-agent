@@ -98,7 +98,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         self.assertIn("nested/", result)
         self.assertNotIn("child.txt", result)
 
-    async def test_ignore_not_list_is_ignored(self):
+    async def test_ignore_not_list_is_not_ignored(self):
         self._create_file("a.txt")
 
         result = await fs._ls_impl(
@@ -109,7 +109,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
             self.ctx
         )
 
-        self.assertIn("a.txt", result)
+        self.assertNotIn("a.txt", result)
 
     async def test_non_string_ignore_entries_are_filtered(self):
         self._create_file("a.txt")
