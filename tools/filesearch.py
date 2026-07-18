@@ -325,18 +325,20 @@ def register_fsearch_tools(registry: ToolRegistry, ctx: InvocationContext):
     registry.register(
         name="Glob",
         description=dedent("""\
-            Search for files using glob patterns (e.g. '**/*.py', 'src/{a,b}/*.js').
-            Supports recursive globstars (**) and brace expansion ({a,b}).
-            Results are sorted by modification time (newest first).
+            Search for files using advanced glob patterns. 
+            Supports:
+              - Recursive directory search (using `**`)
+              - Single-character matching (using `?`)
+              - Range/character matching (e.g. `[a-z]`, `[!0-9]`)
+              - Brace expansion (e.g. `src/{a,b}/*.js`)
+              - Hidden file matching (dotfiles like `.env` are matched automatically)
+              - Extended glob patterns (e.g. `!(test)/**/*.js` to exclude, or `@(index|about).html` to isolate).
 
             Use this when searching by file name, as it avoids reading
             file contents and is significantly more efficient.
 
             Use the `exclude` parameter to skip directories or file patterns that are
-            not relevant (e.g. 'node_modules/**', 'vendor/**', '**/*.min.js').
-            
-            If you are doing an ambiguous search that might need multiple successive attempts at Glob,
-            you should do so with the Task tool."""),
+            not relevant (e.g. 'node_modules/**', 'vendor/**', '**/*.min.js')."""),
         input_schema={
             "type": "object",
             "properties": {
