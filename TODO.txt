@@ -1,14 +1,12 @@
--decide if returning diff string from edit is worth.
+-implement plan mode and remaining basic tools.
 
--review all builtin prompts (system and tools).
+-agentic loop is not showing thinking messages, decide if we should (assistant response.content text | thinking).
 
 -implement the file watcher.
 
 -review tools descriptions and return strings: example, "cat -n in edit" seems unecessary.
 
--add more/missing agent tests.
-
--implement plan mode and remaining basic tools.
+-decide if returning diff string from edit is worth.
 
 -add some control over provider (besides --model flag), reasoning level, etc.
 
