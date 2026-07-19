@@ -92,7 +92,7 @@ class TestHooks(unittest.IsolatedAsyncioTestCase):
         self.mgr.register_pre_tool(hook_b)
         self.mgr.register_pre_tool(hook_c)
         
-        result = await self.mgr.trigger_pre_tool("Bash", {"cmd": "rm -rf"})
+        result = await self.mgr.trigger_pre_tool("Shell", {"cmd": "rm -rf"})
         
         # Hook C should never be reached!
         self.assertEqual(call_order, ['A', 'B'])
@@ -117,7 +117,7 @@ class TestHooks(unittest.IsolatedAsyncioTestCase):
         self.mgr.register_post_tool(hook_x)
         self.mgr.register_post_tool(hook_y)
         
-        result = await self.mgr.trigger_post_tool("Bash", {}, "command output")
+        result = await self.mgr.trigger_post_tool("Shell", {}, "command output")
         
         self.assertEqual(len(result.additional_context), 2)
         self.assertEqual(result.additional_context[0].text, "X-Context")

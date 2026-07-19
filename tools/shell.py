@@ -4,8 +4,8 @@ from sessioncontext import InvocationContext
 from typing import Any
 from textwrap import dedent
 
-async def _bash_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturnType:
-    """Instructs the loop to run a bash command."""
+async def _shell_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturnType:
+    """Instructs the loop to run a shell command."""
     command = kwargs.get("command")
 
     # Clean whitespace and strip command before validation
@@ -33,7 +33,7 @@ def register_shell_tools(registry: ToolRegistry, ctx: InvocationContext):
             Executes a command in the system's default shell (bash on Unix, cmd.exe on Windows).
             - Use commands appropriate for the current OS (revealed in the system prompt).
             
-            Where it is good to use a bash command:
+            Where it is good to use a shell command:
             - To invoke the project's build/typecheck/test tools
             - To run deploy commands BUT ONLY with the user's explicit instruction
             - To run git commands to learn about the repository
@@ -41,7 +41,7 @@ def register_shell_tools(registry: ToolRegistry, ctx: InvocationContext):
             - To use familiar unix helper tools like awk, sed, or jq if that's needed to learn something
             - To run a helper script that you've written
             
-            BE CAREFUL! THERE ARE MANY DANGEROUS BASH COMMANDS.
+            BE CAREFUL! THERE ARE MANY DANGEROUS SHELL COMMANDS.
             - Be very careful about any "rm" or "del" command. Only do these with the user's explicit instruction.
             - Be careful to quote arguments properly.
             - Do not use shell commands if you have an equivalent tool at your disposal.
@@ -66,5 +66,5 @@ def register_shell_tools(registry: ToolRegistry, ctx: InvocationContext):
             },
             "required": ["command"]
         },        
-        func=lambda kwargs: _bash_impl(kwargs, ctx)
+        func=lambda kwargs: _shell_impl(kwargs, ctx)
     )

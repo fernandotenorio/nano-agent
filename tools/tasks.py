@@ -28,7 +28,7 @@ _SUB_AGENTS = [
         type="code-reviewer",
         description="Strict code reviewer. Looks for logic flaws, edge cases, and missing invariants.",
         core_system_prompt="You are a strict read-only code reviewer. Evaluate code with skepticism and rigor. Look for flaws, bugs, and loopholes.",
-        tools=["Read", "Bash"]  # Can only read and run test commands!
+        tools=["Read", "Shell"]  # Can only read and run test commands!
     )
 ]
 

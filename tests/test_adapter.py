@@ -77,7 +77,7 @@ class TestAdapterLLM(unittest.IsolatedAsyncioTestCase):
     def test_to_openai_message_assistant_tool_use(self):
         msg = AssistantMessage(content=[
             TextMessageContent(text="Let me do that."),
-            ToolUseMessageContent(id="call_123", name="Bash", input={"cmd": "ls"})
+            ToolUseMessageContent(id="call_123", name="Shell", input={"cmd": "ls"})
         ])
         
         out = to_openai_message(msg, add_cache_control=False)
@@ -85,7 +85,7 @@ class TestAdapterLLM(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out[0]["role"], "assistant")
         self.assertEqual(out[0]["content"], "Let me do that.")
         self.assertEqual(out[0]["tool_calls"][0]["id"], "call_123")
-        self.assertEqual(out[0]["tool_calls"][0]["function"]["name"], "Bash")
+        self.assertEqual(out[0]["tool_calls"][0]["function"]["name"], "Shell")
         # Ensure arguments are serialized to JSON string
         self.assertEqual(out[0]["tool_calls"][0]["function"]["arguments"], '{"cmd": "ls"}')
 

@@ -63,7 +63,7 @@ Message = Union[SystemMessage, UserMessage, AssistantMessage]
 # ---------------------------------------------------------
 
 class ShellCallback(pydantic.BaseModel):
-    """Returned by the Bash tool to instruct the loop to run a subprocess."""
+    """Returned by the Shell tool to instruct the loop to run a subprocess."""
     kind: Literal["shell_callback"] = "shell_callback"
     command: str
     callback_description: str | None = None
