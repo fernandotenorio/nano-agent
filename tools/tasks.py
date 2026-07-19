@@ -64,13 +64,13 @@ def register_tasks_tools(registry: ToolRegistry, ctx: InvocationContext):
         name="Task",
         description=dedent("""\
         This tool launches a sub-agent for handling ambiguous, complex or multi-step tasks.
-        These kinds of sub-agents are available. Use the subagent_type parameter to say which one you want.
+        The following types of sub-agents are available. Use the subagent_type parameter to say which one you want.
         """) + \
         "\n".join([f"- {subagent.type}: {subagent.description} (Tools: {', '.join(subagent.tools) if subagent.tools else '*'})" for subagent in _SUB_AGENTS]) + \
         dedent("""
 
         You should be eager to pro-actively use sub-agents. They are good for a wide variety of tasks,
-        especially code-search and code-review. (Except, if you have just a simple job to do like Read or Grep,
+        especially code-search and code-review. (Except, if you have just a simple job to do like Read or Glob,
         then there's no need for a sub-agent; you can do the work more efficiently yourself).
 
         You must take care to give the sub-agent a good prompt. The sub-agent knows nothing of your
