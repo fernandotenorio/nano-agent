@@ -1,10 +1,10 @@
 from datetime import datetime
 import platform
 import os
-from pathlib import Path
 from textwrap import dedent
+from sessioncontext import InvocationContext
 
-def get_environment_details() -> str:
+def get_environment_details(ctx: InvocationContext) -> str:
     """Returns a formatted summary of the current execution environment."""
     
     try:
@@ -23,8 +23,18 @@ def get_environment_details() -> str:
             ram = "Unknown"
 
         e = dedent(f'''
+        <workspace>
+        Root: {ctx.workspace}
+        Current directory: {ctx.cwd}
+        Workspace root is a Git repo: {'Yes' if ctx.workspace_is_git_repo else 'No'}
+
+        The workspace root defines the project boundary. Relative paths
+        are resolved from the current directory. When using tools, treat
+        the workspace root as the top-level location unless the user
+        explicitly instructs otherwise.
+        </workspace>
+
         <environment>
-        Current directory: {Path.cwd()}
         OS: {platform.system()} {platform.release()}
         Architecture: {platform.machine()}        
         Current time: {now.strftime("%Y-%m-%d %H:%M:%S %z")}

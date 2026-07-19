@@ -32,9 +32,9 @@ _SUB_AGENTS = [
     )
 ]
 
-def get_subagent_system_prompt(profile: SubAgentProfile) -> str:
+def get_subagent_system_prompt(profile: SubAgentProfile, ctx: InvocationContext) -> str:
     """Builds the specific system prompt for a sub-agent."""
-    return f"{profile.core_system_prompt}\n\n{get_environment_details()}"
+    return f"{profile.core_system_prompt}\n\n{get_environment_details(ctx)}"
 
 async def _task_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturnType:
     prompt = kwargs.get("prompt")
@@ -55,7 +55,7 @@ async def _task_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
         subagent_type=subagent_type,
         callback_description=description,
         tools=profile.tools,
-        system_content=get_subagent_system_prompt(profile),        
+        system_content=get_subagent_system_prompt(profile, ctx),        
         user_content=prompt 
     )
 

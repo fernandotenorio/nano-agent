@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from config import load_app_config
 from prompts import build_system_prompt, _DEFAULT_USER_INSTRUCTIONS, _load_core_instructions
+from sessioncontext import InvocationContext
 
 
 class MockArgs:
@@ -53,6 +54,13 @@ class TestSystemPromptBuilder(unittest.TestCase):
         self.app_config = load_app_config()
         self.core_instructions = _load_core_instructions(self.app_config)
 
+        self.ctx = InvocationContext(
+            workspace="proj/dummy/",
+            cwd="proj/dummy/",
+            workspace_is_git_repo=False,
+            resume_file=None
+        )
+
     def tearDown(self):
         self.home_patcher.stop()
         self.env_patcher.stop()
@@ -65,7 +73,7 @@ class TestSystemPromptBuilder(unittest.TestCase):
     def test_default_fallback_behavior(self):
         """Test 1.1: With no files and no flags, it falls back to 3 distinct parts."""
         args = MockArgs()
-        sys_msg = build_system_prompt(self.app_config, self.mock_cwd, args)
+        sys_msg = build_system_prompt(self.app_config, self.mock_cwd, self.ctx, args)
         
         # The prompt should be joined by \n\n---\n\n
         parts = sys_msg.content.split("\n\n---\n\n")
@@ -85,7 +93,7 @@ class TestSystemPromptBuilder(unittest.TestCase):
         custom_file.write_text("Act as a strict linter.", encoding="utf-8")
         
         args = MockArgs(system_prompt_file=str(custom_file))
-        sys_msg = build_system_prompt(self.app_config, self.mock_cwd, args)
+        sys_msg = build_system_prompt(self.app_config, self.mock_cwd, self.ctx, args)
         
         self.assertIn("Act as a strict linter.", sys_msg.content)
         self.assertNotIn(_DEFAULT_USER_INSTRUCTIONS, sys_msg.content)
@@ -96,7 +104,7 @@ class TestSystemPromptBuilder(unittest.TestCase):
         args = MockArgs(system_prompt_file=str(missing_file))
         
         with self.assertLogs(level='WARNING') as cm:
-            sys_msg = build_system_prompt(self.app_config, self.mock_cwd, args)
+            sys_msg = build_system_prompt(self.app_config, self.mock_cwd, self.ctx, args)
             
         self.assertIn(_DEFAULT_USER_INSTRUCTIONS, sys_msg.content)
         self.assertTrue(any("Could not load instructions" in log for log in cm.output))
@@ -107,7 +115,7 @@ class TestSystemPromptBuilder(unittest.TestCase):
         empty_file.write_text("   \n  \n", encoding="utf-8")
         
         args = MockArgs(system_prompt_file=str(empty_file))
-        sys_msg = build_system_prompt(self.app_config, self.mock_cwd, args)
+        sys_msg = build_system_prompt(self.app_config, self.mock_cwd, self.ctx, args)
         
         self.assertIn(_DEFAULT_USER_INSTRUCTIONS, sys_msg.content)
 
@@ -121,7 +129,7 @@ class TestSystemPromptBuilder(unittest.TestCase):
         # Patch read_text to simulate a permissions error
         with patch("pathlib.Path.read_text", side_effect=PermissionError("Access denied")):
             with self.assertLogs(level='WARNING') as cm:
-                sys_msg = build_system_prompt(self.app_config, self.mock_cwd, args)
+                sys_msg = build_system_prompt(self.app_config, self.mock_cwd, self.ctx, args)
                 
         self.assertIn(_DEFAULT_USER_INSTRUCTIONS, sys_msg.content)
         self.assertTrue(any("Failed to read" in log for log in cm.output))
@@ -141,7 +149,7 @@ class TestSystemPromptBuilder(unittest.TestCase):
         self._setup_global_system_file("Global company guidelines.")
         
         args = MockArgs()
-        sys_msg = build_system_prompt(self.app_config, self.mock_cwd, args)
+        sys_msg = build_system_prompt(self.app_config, self.mock_cwd, self.ctx, args)
         
         self.assertIn("Global company guidelines.", sys_msg.content)
 
@@ -150,7 +158,7 @@ class TestSystemPromptBuilder(unittest.TestCase):
         self._setup_global_system_file("Global company guidelines.")
         
         args = MockArgs(no_global_system_prompt_file=True)
-        sys_msg = build_system_prompt(self.app_config, self.mock_cwd, args)
+        sys_msg = build_system_prompt(self.app_config, self.mock_cwd, self.ctx, args)
         
         self.assertNotIn("Global company guidelines.", sys_msg.content)
 
@@ -169,7 +177,7 @@ class TestSystemPromptBuilder(unittest.TestCase):
         self._setup_project_system_file("Project specific architecture rules.")
         
         args = MockArgs()
-        sys_msg = build_system_prompt(self.app_config, self.mock_cwd, args)
+        sys_msg = build_system_prompt(self.app_config, self.mock_cwd, self.ctx, args)
         
         self.assertIn("Project specific architecture rules.", sys_msg.content)
 
@@ -178,7 +186,7 @@ class TestSystemPromptBuilder(unittest.TestCase):
         self._setup_project_system_file("Project specific architecture rules.")
         
         args = MockArgs(no_proj_system_prompt_file=True)
-        sys_msg = build_system_prompt(self.app_config, self.mock_cwd, args)
+        sys_msg = build_system_prompt(self.app_config, self.mock_cwd, self.ctx, args)
         
         self.assertNotIn("Project specific architecture rules.", sys_msg.content)
 
@@ -203,7 +211,7 @@ class TestSystemPromptBuilder(unittest.TestCase):
         
         # Action
         args = MockArgs(system_prompt_file=str(custom_file))
-        sys_msg = build_system_prompt(self.app_config, self.mock_cwd, args)
+        sys_msg = build_system_prompt(self.app_config, self.mock_cwd, self.ctx, args)
         
         # Assertions
         parts = sys_msg.content.split("\n\n---\n\n")

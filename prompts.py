@@ -5,6 +5,7 @@ from pathlib import Path
 from config import AppConfig
 from textwrap import dedent
 from typedefs import SystemMessage
+from sessioncontext import InvocationContext
 from environment import get_environment_details
 
 
@@ -74,7 +75,7 @@ def _load_user_instructions(args) -> str:
     return text
 
 
-def build_system_prompt(app_config: AppConfig, cwd: Path, args) -> SystemMessage:
+def build_system_prompt(app_config: AppConfig, cwd: Path, ctx: InvocationContext, args) -> SystemMessage:
     parts: list[str] = []
 
     # Immutable core prompt
@@ -100,7 +101,7 @@ def build_system_prompt(app_config: AppConfig, cwd: Path, args) -> SystemMessage
             parts.append(text)
 
     # Environment information
-    parts.append(get_environment_details())
+    parts.append(get_environment_details(ctx))
 
     return SystemMessage(
         content="\n\n---\n\n".join(parts)

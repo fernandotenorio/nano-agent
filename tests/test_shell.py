@@ -19,6 +19,7 @@ class TestShellTool(unittest.IsolatedAsyncioTestCase):
         self.ctx = InvocationContext(
             workspace=Path("/dummy/workspace"),
             cwd=Path("/dummy/workspace"),
+            workspace_is_git_repo=False,
             resume_file=None
         )
 

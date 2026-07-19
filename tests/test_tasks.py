@@ -21,6 +21,7 @@ class TestSubAgentTasks(unittest.IsolatedAsyncioTestCase):
         self.ctx = InvocationContext(
             workspace=Path("/dummy/workspace"),
             cwd=Path("/dummy/workspace"),
+            workspace_is_git_repo=False,
             resume_file=None
         )
 
@@ -98,7 +99,7 @@ class TestSubAgentTasks(unittest.IsolatedAsyncioTestCase):
         # Grab the first profile in the list (default-agent)
         profile = _SUB_AGENTS[0]
         
-        sys_prompt = get_subagent_system_prompt(profile)
+        sys_prompt = get_subagent_system_prompt(profile, self.ctx)
         
         self.assertTrue(sys_prompt.startswith(profile.core_system_prompt))
         self.assertTrue(sys_prompt.endswith("<env>Mac OS</env>"))

@@ -26,7 +26,8 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
 
         self.ctx = InvocationContext(
             workspace=self.base_path,
-            cwd=self.base_path,  # Or a subfolder if you want to test relative paths
+            cwd=self.base_path,
+            workspace_is_git_repo=False,
             resume_file=None
         )
 

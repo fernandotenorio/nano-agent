@@ -258,7 +258,7 @@ async def main():
 
     # project workspace
     parser.add_argument(
-        "--root-dir",
+        "--workspace-root",
         type=str,
         default=None,
         help="The workspace root directory (defaults to current working directory)"
@@ -284,12 +284,12 @@ async def main():
 
     args = parser.parse_args()
 
-    # Root directory resolution and validation
-    root_dir = Path(args.root_dir).expanduser().resolve() if args.root_dir else cwd
+    # Workspace root directory resolution and validation
+    root_dir = Path(args.workspace_root).expanduser().resolve() if args.workspace_root else cwd
 
     # Exit with error if cwd it no within workspace dir
     if not cwd.is_relative_to(root_dir):
-        print(f"Error: Current directory ({cwd}) is not within the specified --root-dir ({root_dir}).")
+        print(f"Error: Current directory ({cwd}) is not within the specified --workspace-root ({root_dir}).")
         sys.exit(1)
 
     # Creates transcripts folder if it does not exists
@@ -304,6 +304,7 @@ async def main():
     ctx = InvocationContext(
         workspace=root_dir,
         cwd=cwd,
+        workspace_is_git_repo = (root_dir / ".git").exists(),
         resume_file=Path(args.resume) if args.resume else None
     )
     
@@ -319,7 +320,7 @@ async def main():
 
     # System Prompt injection (only if transcript is brand new)
     if len(transcript.messages) == 0:
-        transcript.append(build_system_prompt(app_config, cwd, args))
+        transcript.append(build_system_prompt(app_config, cwd, ctx, args))
     
     print(f"Welcome to {app_config.app_name.capitalize()} Code Agent (Type '/quit' to exit)")
     

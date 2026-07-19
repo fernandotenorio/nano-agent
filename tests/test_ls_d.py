@@ -19,6 +19,7 @@ class TestLsIgnoreLogic(unittest.IsolatedAsyncioTestCase):
         self.ctx = InvocationContext(
             workspace=self.workspace,
             cwd=self.workspace,
+            workspace_is_git_repo=False,
             resume_file=None
         )
 
