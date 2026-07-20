@@ -1,12 +1,14 @@
--implement plan mode and remaining basic tools.
+-what happens if acompletion throws?
 
 -agentic loop is not showing thinking messages, decide if we should (assistant response.content text | thinking).
 
--implement the file watcher.
+-implement basic tool observability in the cli (did it succeed? if not, what happened?)
 
--review tools descriptions and return strings: example, "cat -n in edit" seems unecessary.
+-decide if we should implement the file watcher.
 
--decide if returning diff string from edit is worth.
+-review tools descriptions and exactly what they return: example, "cat -n" in edit seems unecessary.
+
+-decide if returning diff string patches from edit is worth.
 
 -add some control over provider (besides --model flag), reasoning level, etc.
 
