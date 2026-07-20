@@ -10,12 +10,13 @@ import logging
 
 from config import AppConfig, load_app_config
 from prompts import build_system_prompt
-from sessioncontext import InvocationContext
+from sessioncontext import InvocationContext, AgentPolicy, AgentMode
 
 from typing import Literal
 from typedefs import (
     TextMessageContent, ToolResultMessageContent, ToolUseMessageContent,
-    ToolFailure, UserMessage, SystemMessage, ShellCallback, AgentCallback
+    ToolFailure, UserMessage, SystemMessage, ShellCallback, AgentCallback,
+    PlanApprovalCallback
 )
 from adapter import acompletion
 from dotenv import load_dotenv
@@ -139,7 +140,8 @@ async def execute_tool(
     registry: ToolRegistry, 
     hooks: HookManager, 
     transcript_path: Path,
-    model: str
+    model: str,
+    policy: AgentPolicy=None
 ) -> list[TextMessageContent | ToolResultMessageContent]:
     """
     Invokes a tool, handles pre/post hooks, and catches execution exceptions.
@@ -166,6 +168,33 @@ async def execute_tool(
             result_output, is_error = await handle_shell(raw_result)
         elif isinstance(raw_result, AgentCallback):
             result_output, is_error = await handle_subagent(raw_result, registry, hooks, transcript_path, model=model)
+        elif isinstance(raw_result, PlanApprovalCallback):
+            print("\n" + "="*40)
+            print(" AI PROPOSED PLAN:")
+            print("=" * 40)
+            print(raw_result.plan_summary)
+            print("=" * 40)
+            print("1. Accept plan and switch to BUILD mode")
+            print("2. Accept plan but keep in PLAN mode (to refine further)")
+            print("3. Reject plan with message")
+            
+            # Note: For simple CLI, synchronous input() here is fine
+            choice = input("\nSelect an option (1/2/3): ").strip()
+            
+            if choice == "1":
+                policy.mode = AgentMode.BUILD
+                policy.notified_mode = AgentMode.BUILD # Prevent the hook from double-firing
+                result_output = "SUCCESS: User accepted the plan and switched to BUILD mode. You now have access to write tools. Proceed with execution."
+                is_error = False
+
+            elif choice == "2":
+                result_output = "User accepted the plan, but chose to remain in PLAN mode. Await further user instructions."
+                is_error = False
+
+            else:
+                reason = input("Enter rejection reason: ").strip()
+                result_output = f"REJECTED: User rejected the plan. Reason: {reason}"
+                is_error = True
         elif isinstance(raw_result, ToolFailure):
             # EXPLICIT FAILURE
             result_output = raw_result.error_message
@@ -199,12 +228,21 @@ async def execute_tool(
 
     return content
 
-async def run_agentic_loop(transcript: Transcript, registry: ToolRegistry, hooks: HookManager, model: str) -> list[TextMessageContent]:
+async def run_agentic_loop(
+    transcript: Transcript,
+    base_registry: ToolRegistry,
+    hooks: HookManager,
+    model: str,
+    policy: AgentPolicy
+) -> list[TextMessageContent]:
     """
     Returns the pristine list of text blocks from the LLM when no more tools are requested.
     """
     while True:
-        schemas = registry.get_all_schemas()
+        # Dynamically evaluate tools on every loop iteration
+        current_registry = base_registry.clone_readonly() if policy.mode == AgentMode.PLAN else base_registry
+        schemas = current_registry.get_all_schemas()
+
         response = await acompletion(model, schemas, transcript.messages)
         transcript.append(response)
 
@@ -221,7 +259,8 @@ async def run_agentic_loop(transcript: Transcript, registry: ToolRegistry, hooks
         # Execute all tools requested by the LLM
         tool_results_content = []
         for tu in tool_uses:
-            result_blocks = await execute_tool(tu, registry, hooks, transcript.file_path, model=model)
+            # Pass current_registry and policy down
+            result_blocks = await execute_tool(tu, current_registry, hooks, transcript.file_path, model=model, policy=policy)
             tool_results_content.extend(result_blocks)
 
         transcript.append(UserMessage(content=tool_results_content))
