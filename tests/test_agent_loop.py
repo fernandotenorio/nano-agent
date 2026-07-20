@@ -14,6 +14,7 @@ from typedefs import (
 from hooks import PreToolUseEvent, PostToolUseEvent, UserPromptEvent
 from agent import run_agentic_loop
 from agent import execute_tool, handle_shell, handle_subagent, main
+from sessioncontext import AgentPolicy, AgentMode
 
 
 class TestAgenticLoopGroup1(unittest.IsolatedAsyncioTestCase):
@@ -36,6 +37,10 @@ class TestAgenticLoopGroup1(unittest.IsolatedAsyncioTestCase):
         
         # 3. Mock the HookManager
         self.hooks = MagicMock()
+
+        # Policy
+        self.policy = AgentPolicy()
+        self.policy.mode = AgentMode.BUILD
         
         # 4. Standard vars
         self.model = "test-mock-model"
@@ -58,7 +63,7 @@ class TestAgenticLoopGroup1(unittest.IsolatedAsyncioTestCase):
         )
 
         # Action
-        result = await run_agentic_loop(self.transcript, self.registry, self.hooks, self.model)
+        result = await run_agentic_loop(self.transcript, self.registry, self.hooks, self.model, self.policy)
 
         # Assertions
         self.assertEqual(result, [text_block])
@@ -96,7 +101,7 @@ class TestAgenticLoopGroup1(unittest.IsolatedAsyncioTestCase):
         mock_execute_tool.return_value = [tool_result]
 
         # Action
-        result = await run_agentic_loop(self.transcript, self.registry, self.hooks, self.model)
+        result = await run_agentic_loop(self.transcript, self.registry, self.hooks, self.model, self.policy)
 
         # Assertions
         # Loop exited correctly with the final text
@@ -108,7 +113,7 @@ class TestAgenticLoopGroup1(unittest.IsolatedAsyncioTestCase):
         
         # Tool executed exactly once with correct parameters
         mock_execute_tool.assert_called_once_with(
-            tool_use, self.registry, self.hooks, self.transcript.file_path, model=self.model
+            tool_use, self.registry, self.hooks, self.transcript.file_path, model=self.model, policy=self.policy
         )
         
         # Transcript should have 3 appends: msg1, UserMessage(ToolResult), msg2
@@ -151,7 +156,7 @@ class TestAgenticLoopGroup1(unittest.IsolatedAsyncioTestCase):
         mock_execute_tool.side_effect = [[tr1], [tr2], [tr3]]
 
         # Action
-        result = await run_agentic_loop(self.transcript, self.registry, self.hooks, self.model)
+        result = await run_agentic_loop(self.transcript, self.registry, self.hooks, self.model, self.policy)
 
         # Assertions
         # execute_tool was called exactly 3 times

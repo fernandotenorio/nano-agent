@@ -21,7 +21,7 @@ from typedefs import (
 from adapter import acompletion
 from dotenv import load_dotenv
 from transcript import Transcript
-from hooks import HookManager, initial_setup_hook
+from hooks import HookManager, initial_setup_hook, agent_mode_hook
 from tools.registry import ToolRegistry
 from tools.core import create_core_registry
 
@@ -128,8 +128,11 @@ async def handle_subagent(
     if callback.tools is not None:
         sub_registry = parent_registry.clone_filtered(callback.tools)
 
+    # Create an isolated policy for the sub-agent and pass it
+    sub_policy = AgentPolicy(mode=AgentMode.BUILD)
+
     # --- Capture the pristine list of blocks ---
-    final_blocks = await run_agentic_loop(sub_transcript, sub_registry, hooks, model=model)
+    final_blocks = await run_agentic_loop(sub_transcript, sub_registry, hooks, model=model, policy=sub_policy)
     
     print(f"  >> [Sub-Agent '{callback.subagent_type}' finished]")
     return final_blocks, False
@@ -350,9 +353,17 @@ async def main():
     # Initialize State
     registry = create_core_registry(ctx)
     hooks = HookManager()
+
+    # Agent policy
+    policy = AgentPolicy()
+    policy.mode = AgentMode.BUILD
     
-    bound_hook = partial(initial_setup_hook, app_config=app_config, root=root_dir, cwd=cwd)
-    hooks.register_user_prompt(bound_hook)
+    # Bind and register both hooks
+    bound_setup_hook = partial(initial_setup_hook, app_config=app_config, root=root_dir, cwd=cwd)
+    bound_mode_hook = partial(agent_mode_hook, policy=policy)
+
+    hooks.register_user_prompt(bound_setup_hook)
+    hooks.register_user_prompt(bound_mode_hook)
     
     # Load (or create) the main transcript
     transcript = Transcript(transcript_file)
@@ -361,13 +372,32 @@ async def main():
     if len(transcript.messages) == 0:
         transcript.append(build_system_prompt(app_config, cwd, ctx, args))
     
-    print(f"Welcome to {app_config.app_name.capitalize()} Code Agent (Type '/quit' to exit)")
+    print(f"Welcome to {app_config.app_name.capitalize()} Code Agent (Type '/quit' to exit, '/plan' or '/build' to switch modes)")
     
     while True:
         try:
             user_input = input("\n> ")
             if user_input.strip().lower() in ["/quit", "/exit"]:
                 break
+
+            # Intercept Mode Commands
+            user_input_lower = user_input.strip().lower()
+
+            if user_input_lower.startswith("/plan"):
+                policy.mode = AgentMode.PLAN
+                print("[Switched to PLAN Mode]")                
+                user_input = user_input[len("/plan"):].strip()
+
+                if not user_input:
+                    continue
+            elif user_input_lower.startswith("/build"):
+                policy.mode = AgentMode.BUILD
+                print("[Switched to BUILD Mode]")
+                user_input = user_input[len("/build"):].strip()
+
+                if not user_input:
+                    continue
+
             if not user_input.strip():
                 continue
 
@@ -387,7 +417,7 @@ async def main():
             ]
             
             transcript.append(UserMessage(content=message_content))
-            await run_agentic_loop(transcript, registry, hooks, model=args.model)
+            await run_agentic_loop(transcript, registry, hooks, model=args.model, policy=policy)
             
         except (KeyboardInterrupt, EOFError):
             print("\nExiting...")
