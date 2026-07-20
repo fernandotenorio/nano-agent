@@ -1,9 +1,10 @@
 # tools/plan.py
-from tools.registry import ToolRegistry
+from tools.registry import ToolRegistry, ToolReturnType
 from typedefs import PlanApprovalCallback
+from typing import Any
 from sessioncontext import InvocationContext
 
-async def _plan_impl(kwargs: dict[str, Any]) -> ToolReturnType:
+async def _plan_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturnType:
     """Explicitly submits a plan for user approval."""
     plan_summary = kwargs.get("plan_summary", "No plan provided.")
     return PlanApprovalCallback(plan_summary=plan_summary)
