@@ -6,6 +6,7 @@ from typing import Literal, Callable, Awaitable
 from typedefs import TextMessageContent
 from config import AppConfig
 from context import gather_context_files
+from sessioncontext import AgentPolicy, AgentMode
 
 # ---------------------------------------------------------
 # Event Context Models
@@ -106,5 +107,37 @@ async def initial_setup_hook(
         
         </system-reminder>''')
         event.context_pre.append(TextMessageContent(text=reminder))
+        
+    return event
+
+
+# ---------------------------------------------------------
+# Built-in Hook: Plan mode Injector
+# ---------------------------------------------------------
+
+async def agent_mode_hook(
+    event: UserPromptEvent, 
+    policy: AgentPolicy
+) -> UserPromptEvent:
+    """Injects a system reminder only when the agent transitions between modes."""
+    
+    if policy.mode != policy.notified_mode:
+        if policy.mode == AgentMode.PLAN:
+            reminder = dedent("""
+            <system-reminder>
+            You are now in PLAN MODE. You only have access to read-only tools.
+            Investigate the codebase as needed. When you are ready, you MUST use the `SubmitPlan` tool to propose your plan to the user.
+            </system-reminder>""")
+            event.context_pre.append(TextMessageContent(text=reminder))
+            
+        elif policy.mode == AgentMode.BUILD:
+            reminder = dedent("""
+            <system-reminder>
+            You are now in BUILD MODE. You have full access to write and shell tools.
+            </system-reminder>""")
+            event.context_pre.append(TextMessageContent(text=reminder))
+            
+        # Mark as notified so we don't spam the LLM on subsequent messages
+        policy.notified_mode = policy.mode
         
     return event
