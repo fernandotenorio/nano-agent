@@ -319,7 +319,8 @@ def register_fsystem_tools(registry: ToolRegistry, ctx: InvocationContext):
             },
             "required": ["file_path"]
         },        
-        func=lambda kwargs: _read_impl(kwargs, ctx)
+        func=lambda kwargs: _read_impl(kwargs, ctx),
+        is_readonly = True
     )
 
     registry.register(
@@ -344,7 +345,8 @@ def register_fsystem_tools(registry: ToolRegistry, ctx: InvocationContext):
             },
             "required": ["file_path", "content"]
         },        
-        func=lambda kwargs: _write_impl(kwargs, ctx)
+        func=lambda kwargs: _write_impl(kwargs, ctx),
+        is_readonly = False
     )
 
     registry.register(
@@ -380,7 +382,8 @@ def register_fsystem_tools(registry: ToolRegistry, ctx: InvocationContext):
             },
             "required": ["file_path", "old_string", "new_string"]
         },        
-        func=lambda kwargs: _edit_impl(kwargs, ctx)
+        func=lambda kwargs: _edit_impl(kwargs, ctx),
+        is_readonly = False
     )
 
     registry.register(
@@ -431,5 +434,6 @@ def register_fsystem_tools(registry: ToolRegistry, ctx: InvocationContext):
             },
             "required": ["file_path", "edits"]
         },        
-        func=lambda kwargs: _multiedit_impl(kwargs, ctx)
+        func=lambda kwargs: _multiedit_impl(kwargs, ctx),
+        is_readonly = False
     )

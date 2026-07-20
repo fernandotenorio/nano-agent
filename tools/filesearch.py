@@ -361,7 +361,8 @@ def register_fsearch_tools(registry: ToolRegistry, ctx: InvocationContext):
             },
             "required": ["pattern"]
         },        
-        func=lambda kwargs: _glob_impl(kwargs, ctx)
+        func=lambda kwargs: _glob_impl(kwargs, ctx),
+        is_readonly = True
     )
 
     registry.register(
@@ -406,5 +407,6 @@ def register_fsearch_tools(registry: ToolRegistry, ctx: InvocationContext):
             }
         },        
         
-        func=lambda kwargs: _ls_impl(kwargs, ctx)
+        func=lambda kwargs: _ls_impl(kwargs, ctx),
+        is_readonly = True
     )

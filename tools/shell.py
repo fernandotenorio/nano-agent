@@ -66,5 +66,6 @@ def register_shell_tools(registry: ToolRegistry, ctx: InvocationContext):
             },
             "required": ["command"]
         },        
-        func=lambda kwargs: _shell_impl(kwargs, ctx)
+        func=lambda kwargs: _shell_impl(kwargs, ctx),
+        is_readonly = False
     )

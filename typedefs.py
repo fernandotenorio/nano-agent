@@ -76,3 +76,7 @@ class AgentCallback(pydantic.BaseModel):
     tools: list[str] | None  # If None, subagent can use all tools.
     system_content: str
     user_content: str
+
+class PlanApprovalCallback(pydantic.BaseModel):
+    kind: Literal["plan_approval"] = "plan_approval"
+    plan_summary: str

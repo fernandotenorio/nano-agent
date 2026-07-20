@@ -103,5 +103,6 @@ def register_tasks_tools(registry: ToolRegistry, ctx: InvocationContext):
             },
             "required": ["description", "prompt", "subagent_type"]
         },        
-        func=lambda kwargs: _task_impl(kwargs, ctx)
+        func=lambda kwargs: _task_impl(kwargs, ctx),
+        is_readonly = False
     )
