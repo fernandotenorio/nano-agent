@@ -1,10 +1,12 @@
+-add plan mode tests.
+
+-add filewatcher and fix its issues.
+
 -what happens if acompletion throws?
 
 -agentic loop is not showing thinking messages, decide if we should (assistant response.content text | thinking).
 
 -implement basic tool observability in the cli (did it succeed? if not, what happened?)
-
--decide if we should implement the file watcher.
 
 -review tools descriptions and exactly what they return: example, "cat -n" in edit seems unecessary.
 
