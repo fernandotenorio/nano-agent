@@ -79,14 +79,14 @@ async def _read_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
     if file_size > MAX_FILE_BYTES:
         return ToolFailure(error_message=dedent(f"""\
             Error: File content ({file_size / (1024 * 1024):.1f}MB) exceeds maximum allowed size ({MAX_FILE_BYTES // 1024}KB).
-            Instead read snippets of the file with offset/limit parameters, or search using the Grep tool."""))
+            Instead read snippets of the file with offset/limit parameters, or search using the Glob tool."""))
 
     # Simple approximation: 1 token ~= 4 chars
     tokens = file_size // 4
     if tokens > MAX_TOKENS:
         return ToolFailure(error_message=dedent(f"""\
             Error: File content ({tokens} tokens) exceeds maximum allowed tokens ({MAX_TOKENS} tokens).
-            Instead read snippets of the file with offset/limit parameters, or search using the Grep tool."""))
+            Instead read snippets of the file with offset/limit parameters, or search using the Glob tool."""))
 
     # 4. Read the file
     try:
