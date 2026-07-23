@@ -1,4 +1,3 @@
-I'll start by confirming what's actually available for this review — a few files were listed in your upload but I don't see their contents yet (`filesearch.py`, `filesystem.py`, `agent.py`), and `agent.py` in particular sounds like it'd be the core orchestration loop, which I'd need for a genuinely complete review.I pulled the three files that were listed but hadn't actually made it into context (`filesearch.py`, `filesystem.py`, `agent.py`) — worth doing, since `agent.py` is the orchestrator that ties everything together, and a lot of the more interesting bugs live at the seams between it and the tool modules.
 
 Overall this is a reasonable architecture — plan/build modes, hooks, sub-agents, pluggable backends via LiteLLM, clearly modeled on Claude Code's design. But there's one issue serious enough to lead with, a cluster of correctness bugs that will actually surface in normal use, and a long tail of smaller stuff. Going in priority order.
 
@@ -29,6 +28,9 @@ def should_ignore(p: Path, is_d: bool) -> bool:
 ```
 
 So searching outside the workspace is both allowed *and* unfiltered — `.git/`, `node_modules/`, `.venv/`, `.prismaignore` all stop applying. The fix is the same in both files: resolve the path, then reject (or require an explicit flag to widen scope) if it's not `path.is_relative_to(ctx.workspace)`.
+
+## Plan mode tool has no tests
+We need to add tests for the plan mode tool.
 
 ## Safety hooks exist but nothing's registered
 
@@ -80,8 +82,6 @@ except (KeyboardInterrupt, EOFError):
 `acompletion`'s call inside `run_agentic_loop`, and the hook triggers in `execute_tool`, aren't wrapped in anything else. A rate-limit response, a network blip, or a bug in a future hook propagates all the way up and kills the process with a raw traceback. (Sub-agent failures are accidentally *more* resilient, since a sub-agent's whole loop runs nested inside its parent's own `try/except`.) The transcript persists incrementally, so `--resume` recovers history, but the live session still dies mid-turn.
 
 **`Transcript.load()` has no per-line error handling.** Since transcripts are appended one line at a time and the process can be killed mid-write, a truncated final line is a real possibility — and `json.loads` on it raises uncaught, taking down the *entire* load rather than just that one line. Wrap the per-line parse (JSON decode and `model_validate`) in a try/except that logs and skips.
-
-**`stale_content_files` is checked but never populated.** `filesystem.py` declares it and checks it in three places as part of the read-before-write gate, but nothing anywhere adds to it — only `.discard()` calls exist. Concretely: `Read` a file, then something else changes it on disk (a `Shell` command, an external editor, a sub-agent), then `Write` it — the write proceeds and silently overwrites those external changes, because nothing ever marked the cached read as stale. (Related: since these tracking dicts are module-level globals, they're also shared across the top-level agent *and* every sub-agent — a sub-agent can `Write` a file it never itself `Read`, purely because the parent happened to read it earlier.) Either wire up something that actually populates staleness, or the mechanism should come out — right now it looks unfinished.
 
 **Extended-thinking content is captured but never sent back.** `parse_assistant_response` carefully captures `reasoning_content`/`thinking_blocks` (with signatures) into `ThinkingMessageContent`. But `to_openai_message`'s `AssistantMessage` branch only handles `ToolUseMessageContent` and `TextMessageContent` — any thinking block is silently dropped on the next round-trip. For most providers that's just a quality loss; for Anthropic's actual extended thinking with tool use, the API expects the thinking block to precede the tool_use it justifies when history is resent, so this can be an outright mismatch depending on which model is in play.
 

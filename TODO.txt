@@ -1,7 +1,5 @@
 -add plan mode tests.
 
--add filewatcher and fix its issues.
-
 -what happens if acompletion throws?
 
 -agentic loop is not showing thinking messages, decide if we should (assistant response.content text | thinking).
