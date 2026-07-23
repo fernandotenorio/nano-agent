@@ -139,6 +139,42 @@ class TestFilesystemTools(unittest.IsolatedAsyncioTestCase):
         # Verify state tracker updated
         self.assertIn(file_path.resolve(), self.ctx.file_state.known)
 
+    async def test_write_creates_parent_directories(self):
+        # Writing into a nested directory that doesn't exist yet must succeed
+        file_path = self.base_path / "new_dir" / "sub" / "file.txt"
+        self.assertFalse(file_path.parent.exists())
+
+        result = await _write_impl({"file_path": str(file_path), "content": "nested"}, self.ctx)
+
+        self.assertNotIsInstance(result, ToolFailure)
+        self.assertIn("File created successfully", result)
+        self.assertTrue(file_path.parent.is_dir())
+        self.assertEqual(file_path.read_text(), "nested")
+
+    async def test_edit_fallback_creates_parent_directories(self):
+        # The Edit empty-old_string fallback delegates to Write and must
+        # inherit parent-directory creation.
+        file_path = self.base_path / "deep" / "nested" / "module.py"
+
+        result = await _edit_impl({
+            "file_path": str(file_path), "old_string": "", "new_string": "x = 1"
+        }, self.ctx)
+
+        self.assertNotIsInstance(result, ToolFailure)
+        self.assertIn("File created successfully", result)
+        self.assertEqual(file_path.read_text(), "x = 1")
+
+    async def test_write_parent_directory_creation_failure(self):
+        file_path = self.base_path / "blocked_dir" / "file.txt"
+
+        with patch("pathlib.Path.mkdir", side_effect=PermissionError("Access denied")):
+            result = await _write_impl({"file_path": str(file_path), "content": "data"}, self.ctx)
+
+        self.assertIsInstance(result, ToolFailure)
+        self.assertIn("Error creating parent directories", result.error_message)
+        self.assertIn("Access denied", result.error_message)
+        self.assertFalse(file_path.exists())
+
 
     # ---------------------------------------------------------
     # EDIT TOOL TESTS

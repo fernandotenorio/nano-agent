@@ -132,6 +132,14 @@ async def _write_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRet
         if gate_error:
             return ToolFailure(error_message=gate_error)
 
+    # Create missing parent directories. Safe by construction: file_path has
+    # already passed the workspace boundary check, so every directory created
+    # here is inside the workspace.
+    try:
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return ToolFailure(error_message=f"Error creating parent directories: {str(e)}")
+
     try:
         file_path.write_text(content, encoding="utf-8")
     except Exception as e:
