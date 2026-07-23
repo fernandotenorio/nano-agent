@@ -84,7 +84,7 @@ class TestSubAgentTasks(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(result, AgentCallback)
         self.assertEqual(result.subagent_type, "code-reviewer")
         self.assertEqual(result.callback_description, "Checking for security bugs")
-        self.assertEqual(result.tools, ["Read", "Shell"])  # Strictly restricted
+        self.assertEqual(result.tools, ["Read", "Glob", "ls"])  # Strictly read-only, no Shell
 
 
     # ---------------------------------------------------------
@@ -129,7 +129,7 @@ class TestSubAgentTasks(unittest.IsolatedAsyncioTestCase):
         
         # Verify it lists the code-reviewer and documents its restricted tools
         self.assertIn("code-reviewer", description)
-        self.assertIn("Tools: Read, Shell", description)
+        self.assertIn("Tools: Read, Glob, ls", description)
 
     def test_schema_required_properties(self):
         """Test 5.2: The tool schema strictly enforces required arguments."""

@@ -27,8 +27,13 @@ _SUB_AGENTS = [
     SubAgentProfile(
         type="code-reviewer",
         description="Strict code reviewer. Looks for logic flaws, edge cases, and missing invariants.",
-        core_system_prompt="You are a strict read-only code reviewer. Evaluate code with skepticism and rigor. Look for flaws, bugs, and loopholes.",
-        tools=["Read", "Shell"]  # Can only read and run test commands!
+        core_system_prompt=dedent("""\
+            You are a strict read-only code reviewer. Evaluate code with skepticism and rigor.
+            Look for flaws, bugs, and loopholes.
+            You cannot modify files or run commands; review by reading the code."""),
+        # Genuinely read-only: no Shell. A shell would grant the same
+        # destructive power as the main agent, making the label meaningless.
+        tools=["Read", "Glob", "ls"]
     )
 ]
 

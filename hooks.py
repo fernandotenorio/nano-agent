@@ -81,6 +81,58 @@ class HookManager:
         return event
 
 # ---------------------------------------------------------
+# Built-in Hook: Shell Command Confirmation Gate
+# ---------------------------------------------------------
+
+async def shell_confirmation_hook(event: PreToolUseEvent) -> PreToolUseEvent:
+    """Requires explicit user confirmation before any Shell command runs.
+
+    Shell is the one tool the workspace boundary cannot inspect: a command
+    can read or write anywhere on disk. This gate puts the user in the loop
+    for every command. Fails closed: anything other than an explicit yes
+    (including EOF/interrupt on stdin) denies the command.
+    """
+    if event.tool_name != "Shell":
+        return event
+
+    command = str(event.tool_input.get("command", "")).strip()
+    description = event.tool_input.get("description")
+
+    print("\n" + "-" * 40)
+    print(" SHELL COMMAND CONFIRMATION")
+    print("-" * 40)
+    if description:
+        print(f" Description: {description}")
+    print(f" $ {command}")
+    print("-" * 40)
+
+    try:
+        answer = input("Allow this command? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""  # Fail closed
+
+    if answer in ("y", "yes"):
+        return event
+
+    event.decision = "deny"
+    reason = ""
+    if answer not in ("", "n", "no"):
+        # Anything else the user typed is treated as a denial with feedback
+        reason = answer
+    else:
+        try:
+            reason = input("Optional reason for denying (Enter to skip): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            reason = ""
+
+    event.deny_reason = "User denied permission to run this shell command."
+    if reason:
+        event.deny_reason += f" Reason: {reason}"
+
+    return event
+
+
+# ---------------------------------------------------------
 # Built-in Hook: Agends.md Context Injector
 # ---------------------------------------------------------
 

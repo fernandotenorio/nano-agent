@@ -21,7 +21,7 @@ from typedefs import (
 from adapter import acompletion
 from dotenv import load_dotenv
 from transcript import Transcript
-from hooks import HookManager, initial_setup_hook, agent_mode_hook
+from hooks import HookManager, initial_setup_hook, agent_mode_hook, shell_confirmation_hook
 from filestate import file_changes_hook
 from tools.registry import ToolRegistry
 from tools.core import create_core_registry
@@ -130,6 +130,9 @@ async def handle_subagent(
         partial(initial_setup_hook, app_config=app_config, root=sub_ctx.workspace, cwd=sub_ctx.cwd)
     )
     sub_hooks.register_user_prompt(partial(file_changes_hook, ctx=sub_ctx))
+
+    # Sub-agents must not bypass the Shell confirmation gate
+    sub_hooks.register_pre_tool(shell_confirmation_hook)
 
     # 4. Inject the Sub-Agent's specific System Prompt
     sub_transcript.append(SystemMessage(content=callback.system_content))
@@ -411,6 +414,9 @@ async def main():
     hooks.register_user_prompt(bound_setup_hook)
     hooks.register_user_prompt(bound_mode_hook)
     hooks.register_user_prompt(bound_file_changes_hook)
+
+    # Safety gate: every Shell command requires explicit user confirmation
+    hooks.register_pre_tool(shell_confirmation_hook)
     
     # Load (or create) the main transcript
     transcript = Transcript(transcript_file)
