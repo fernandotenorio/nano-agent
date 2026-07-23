@@ -30,7 +30,7 @@ from tools.core import create_core_registry
 load_dotenv(".env.development")
 logging.basicConfig(level=logging.WARNING)
 
-async def handle_shell(callback: ShellCallback) -> tuple[str, bool]:
+async def handle_shell(callback: ShellCallback, ctx: InvocationContext) -> tuple[str, bool]:
     """
     Executes a shell command natively with timeouts and streaming partial output.
     Returns (output_text, is_error).
@@ -38,20 +38,26 @@ async def handle_shell(callback: ShellCallback) -> tuple[str, bool]:
     MAX_OUTPUT = 30000
     print(f"  $ {callback.command}")
     
+    # Pin the working directory to the agent's cwd (always inside the workspace).
     process = await asyncio.create_subprocess_shell(
         callback.command,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
+        stderr=asyncio.subprocess.PIPE,
+        cwd=str(ctx.cwd)
     )
 
-    # Concurrently read stdout and stderr up to MAX_OUTPUT bytes
+    # Concurrently read stdout and stderr, accumulating up to MAX_OUTPUT bytes
     assert process.stdout is not None and process.stderr is not None
     stdout_parts: list[bytes] = []
     stderr_parts: list[bytes] = []
     
     async def read_stream(stream: asyncio.StreamReader, parts: list[bytes]) -> str:
-        while (chunk := await stream.read(8192)) and sum(len(part) for part in parts) < MAX_OUTPUT:
-            parts.append(chunk)                
+        # Always drain to EOF: stopping reads early would fill the OS pipe
+        # buffer and block the child process until the timeout kills it.
+        # We just stop *accumulating* once the output cap is reached.
+        while chunk := await stream.read(8192):
+            if sum(len(part) for part in parts) < MAX_OUTPUT:
+                parts.append(chunk)
         return b''.join(parts).decode('utf-8', errors='replace')[:MAX_OUTPUT]
 
     stdout_task = asyncio.create_task(read_stream(process.stdout, stdout_parts))
@@ -107,8 +113,10 @@ async def handle_subagent(
     # parent's read history (and vice versa).
     sub_ctx = ctx.clone_for_subagent()
 
-    # 2. Isolated registry whose tool closures are bound to the sub-agent's context
-    sub_registry = create_core_registry(sub_ctx)
+    # 2. Isolated registry whose tool closures are bound to the sub-agent's context.
+    # Sub-agents never get Task (no unbounded recursion) or SubmitPlan (no
+    # interactive plan-approval prompts fired from inside a sub-agent).
+    sub_registry = create_core_registry(sub_ctx).clone_excluding(["Task", "SubmitPlan"])
     if callback.tools is not None:
         sub_registry = sub_registry.clone_filtered(callback.tools)
 
@@ -153,6 +161,14 @@ async def handle_subagent(
     )
     
     print(f"  >> [Sub-Agent '{callback.subagent_type}' finished]")
+
+    # A sub-agent that stops without producing any final text gives the parent
+    # nothing to act on; report that as an error rather than a silent success.
+    if not any(block.text.strip() for block in final_blocks):
+        return [TextMessageContent(
+            text="Sub-agent finished without producing a final report. Treat the task as not completed."
+        )], True
+
     return final_blocks, False
 
 
@@ -162,8 +178,8 @@ async def execute_tool(
     hooks: HookManager, 
     transcript_path: Path,
     model: str,
-    policy: AgentPolicy | None = None,
-    ctx: InvocationContext | None = None
+    policy: AgentPolicy,
+    ctx: InvocationContext
 ) -> list[TextMessageContent | ToolResultMessageContent]:
     """
     Invokes a tool, handles pre/post hooks, and catches execution exceptions.
@@ -187,7 +203,7 @@ async def execute_tool(
         
         # Route Native Callbacks
         if isinstance(raw_result, ShellCallback):
-            result_output, is_error = await handle_shell(raw_result)
+            result_output, is_error = await handle_shell(raw_result, ctx)
         elif isinstance(raw_result, AgentCallback):
             result_output, is_error = await handle_subagent(raw_result, ctx, transcript_path, model=model)
         elif isinstance(raw_result, PlanApprovalCallback):
@@ -250,6 +266,10 @@ async def execute_tool(
 
     return content
 
+# Hard ceiling on tool-calling turns per user prompt. Prevents a confused
+# model from looping forever; the user can always prompt again to continue.
+MAX_AGENT_TURNS = 50
+
 async def run_agentic_loop(
     transcript: Transcript,
     base_registry: ToolRegistry,
@@ -261,7 +281,7 @@ async def run_agentic_loop(
     """
     Returns the pristine list of text blocks from the LLM when no more tools are requested.
     """
-    while True:
+    for _ in range(MAX_AGENT_TURNS):
         # Dynamically evaluate tools on every loop iteration
         current_registry = base_registry.clone_readonly() if policy.mode == AgentMode.PLAN else base_registry
         schemas = current_registry.get_all_schemas()
@@ -287,6 +307,11 @@ async def run_agentic_loop(
             tool_results_content.extend(result_blocks)
 
         transcript.append(UserMessage(content=tool_results_content))
+
+    # Turn ceiling reached: stop the loop instead of running away.
+    warning = f"Stopped after reaching the maximum of {MAX_AGENT_TURNS} tool-calling turns for a single prompt."
+    print(f"[{warning}]")
+    return [TextMessageContent(text=warning)]
 
 def get_transcript_path(app_config: AppConfig, cwd: Path, resume_arg: str | None) -> Path:
     """Determines where to load/save the transcript file."""
@@ -444,6 +469,13 @@ async def main():
         except (KeyboardInterrupt, EOFError):
             print("\nExiting...")
             break
+        except Exception as e:
+            # An API hiccup (rate limit, network blip) or a bug in a hook must
+            # not kill the session: the transcript persists incrementally, so
+            # the conversation can simply continue on the next prompt.
+            logging.exception("Error during agent turn")
+            print(f"\n[ERROR] {type(e).__name__}: {e}")
+            print("The session is still alive. You can try again or type '/quit' to exit.")
 
 if __name__ == "__main__":
     asyncio.run(main())

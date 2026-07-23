@@ -355,6 +355,26 @@ class TestFilesystemTools(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(result, ToolFailure)
         self.assertIn("old_string is a substring of a new_string", result.error_message)
 
+    async def test_multiedit_anchor_extend_allowed(self):
+        # Regression test: an edit whose old_string is a substring of its OWN
+        # new_string (the common "anchor and extend" pattern) must be allowed.
+        # The cascading check should only reject later edits targeting the
+        # output of EARLIER edits.
+        file_path = self.base_path / "anchor.py"
+        file_path.write_text("import os\n\nx = 1")
+        await _read_impl({"file_path": str(file_path)}, self.ctx)
+
+        result = await _multiedit_impl({
+            "file_path": str(file_path),
+            "edits": [
+                {"old_string": "import os", "new_string": "import os\nimport sys"},
+                {"old_string": "x = 1", "new_string": "x = 2"}
+            ]
+        }, self.ctx)
+
+        self.assertNotIsInstance(result, ToolFailure)
+        self.assertEqual(file_path.read_text(), "import os\nimport sys\n\nx = 2")
+
     async def test_multiedit_ambiguous_replacement(self):
         file_path = self.base_path / "ambiguous.txt"
         file_path.write_text("test\nverify\ntest\n")

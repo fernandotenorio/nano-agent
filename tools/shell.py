@@ -4,6 +4,9 @@ from sessioncontext import InvocationContext
 from typing import Any
 from textwrap import dedent
 
+DEFAULT_TIMEOUT_MS = 120000
+MAX_TIMEOUT_MS = 600000  # Documented ceiling in the tool schema
+
 async def _shell_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturnType:
     """Instructs the loop to run a shell command."""
     command = kwargs.get("command")
@@ -16,9 +19,16 @@ async def _shell_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRet
         return ToolFailure(error_message="Error: command is required.")
     
     description = kwargs.get("description")
-    # mini_agent uses timeout in ms (default 120000 ms = 120s)
-    timeout_ms = kwargs.get("timeout", 120000)
-    
+
+    # Timeout in ms (default 120000 ms = 120s). Tolerate an explicit null or
+    # a non-numeric value, and clamp to the documented ceiling.
+    raw_timeout = kwargs.get("timeout")
+    try:
+        timeout_ms = float(raw_timeout) if raw_timeout is not None else DEFAULT_TIMEOUT_MS
+    except (TypeError, ValueError):
+        timeout_ms = DEFAULT_TIMEOUT_MS
+    timeout_ms = min(max(timeout_ms, 1.0), MAX_TIMEOUT_MS)
+
     return ShellCallback(
         command=command,
         callback_description=description,

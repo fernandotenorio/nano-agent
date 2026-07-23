@@ -8,6 +8,7 @@ import itertools
 from pathlib import Path
 from textwrap import dedent
 from tools.ignore import IgnoreMatcher
+from tools.paths import resolve_in_workspace
 from tools.registry import ToolRegistry, ToolReturnType
 from typing import Any, Iterator
 from typedefs import ToolFailure
@@ -30,13 +31,12 @@ async def _glob_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
     if not isinstance(path_str, str):
         return ToolFailure(error_message="Error: path must be a string.")
 
-    try:
-        base_path = Path(path_str).resolve()
-        is_valid_dir = base_path.exists() and base_path.is_dir()
-    except (OSError, RuntimeError, ValueError) as e:
-        return ToolFailure(error_message=f"Error: could not resolve path {path_str!r}: {e}")
+    # Workspace boundary check (resolves relative paths against ctx.cwd)
+    base_path = resolve_in_workspace(path_str, ctx)
+    if isinstance(base_path, ToolFailure):
+        return base_path
 
-    if not is_valid_dir:
+    if not (base_path.exists() and base_path.is_dir()):
         return ToolFailure(
             error_message=f"Error: Directory does not exist or is not a valid directory: {base_path}"
         )
@@ -70,15 +70,6 @@ async def _glob_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
     heap: list[tuple[float, str]] = []
     total_matches = 0
 
-    def should_ignore(p: Path, is_d: bool) -> bool:
-        try:
-            rel_path = p.absolute().relative_to(ctx.workspace.absolute())
-            return ignore_matcher.ignores_relative(rel_path.as_posix(), is_dir=is_d)
-        except ValueError:
-            # If the path being listed is completely outside the workspace,
-            # we default to not ignoring it.
-            return False
-
     def walk_iterative(start: Path) -> None:
         nonlocal total_matches
         stack: list[Path] = [start]
@@ -104,7 +95,7 @@ async def _glob_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
 
                         try:
                             if entry.is_dir(follow_symlinks=False):
-                                if should_ignore(entry_path, True):
+                                if ignore_matcher.ignores(entry_path, is_dir=True):
                                     continue
                                 stack.append(entry_path)
                                 continue
@@ -116,7 +107,7 @@ async def _glob_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
                             continue
 
                         # Check if the file itself should be ignored
-                        if should_ignore(entry_path, False):
+                        if ignore_matcher.ignores(entry_path, is_dir=False):
                             continue
 
                         # Check if it matches the glob pattern
@@ -184,22 +175,21 @@ async def _ls_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturn
     # Initialize the ignore matcher using workspace context
     matcher = IgnoreMatcher(workspace=ctx.workspace, extra_patterns=user_ignore)
 
-    # Use .absolute() to preserve symlink context in the LLM's spatial map
-    target = Path(path_str).absolute()
+    # Workspace boundary check on the fully resolved path (catches both `..`
+    # traversal and symlink roots that escape the workspace).
+    boundary_check = resolve_in_workspace(path_str, ctx)
+    if isinstance(boundary_check, ToolFailure):
+        return boundary_check
+
+    # For traversal and display we deliberately do NOT resolve symlinks:
+    # listing a symlink should show the link itself ("name -> target") to
+    # preserve symlink context in the LLM's spatial map.
+    p = Path(path_str)
+    target = p if p.is_absolute() else (ctx.cwd / p)
 
     # Safely handle broken symlinks by checking both exists() and is_symlink()
     if not target.exists() and not target.is_symlink():
         return ToolFailure(error_message=f"Error: Path does not exist: {target}")
-
-    # review this
-    def should_ignore(p: Path, is_d: bool) -> bool:
-        try:
-            rel_path = p.absolute().relative_to(ctx.workspace.absolute())
-            return matcher.ignores_relative(rel_path.as_posix(), is_dir=is_d)
-        except ValueError:
-            # If the path being listed is completely outside the workspace,
-            # we default to not ignoring it.
-            return False
 
     # Root Node Symlink & File Handling
     # If it's a file, a file-symlink, or a broken symlink, return a leaf node.
@@ -224,7 +214,7 @@ async def _ls_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturn
                     try:                       
                         entry_path = Path(entry.path)
                         is_d, is_sym = entry_type(entry_path)
-                        if not should_ignore(entry_path, is_d):
+                        if not matcher.ignores(entry_path, is_dir=is_d):
                             count+= 1
 
                     except OSError:
@@ -264,7 +254,7 @@ async def _ls_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturn
                 is_p_sym = p.is_symlink()
                 is_d, _ = entry_type(p)
 
-                if should_ignore(p, is_d):
+                if matcher.ignores(p, is_dir=is_d):
                     continue
                 
                 if is_p_sym:

@@ -7,6 +7,7 @@ from typedefs import ToolFailure
 from textwrap import dedent
 from typing import Any
 from tools.registry import ToolRegistry, ToolReturnType
+from tools.paths import resolve_in_workspace
 from sessioncontext import InvocationContext
 from filestate import MAX_FILE_BYTES, FileStateTracker
 
@@ -50,11 +51,16 @@ async def _read_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
     if not file_path_str:        
         return ToolFailure(error_message="Error: file_path is required.")
         
-    file_path = Path(file_path_str).resolve()
+    # 1. Workspace boundary check. Must come BEFORE the existence check and
+    # the "Did you mean?" heuristic so we never leak names outside the workspace.
+    file_path = resolve_in_workspace(file_path_str, ctx)
+    if isinstance(file_path, ToolFailure):
+        return file_path
+
     limit: int = kwargs.get("limit", 2000)
     offset: int = kwargs.get("offset", 1)
 
-    # 1. File existence check with "Did you mean?" heuristic
+    # 2. File existence check with "Did you mean?" heuristic
     if not file_path.exists():
         did_you_mean = ""
         if file_path.parent.exists():
@@ -62,15 +68,14 @@ async def _read_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
             did_you_mean = f" Did you mean {similar.name}?" if similar else ""        
         return ToolFailure(error_message=f"Error: File does not exist.{did_you_mean}")
 
-    # 2. Try reading file
+    # 3. Enforce size constraints BEFORE loading the file into memory, and
+    # BEFORE tracking state: a failed Read must not unlock Write/Edit for
+    # content the model never actually saw.
     try:
-        lines = file_path.read_text(encoding="utf-8").splitlines()
-    except Exception as e:        
+        file_size = file_path.stat().st_size
+    except OSError as e:
         return ToolFailure(error_message=f"Error reading file: {str(e)}")
 
-    # 3. Enforce constraints BEFORE tracking state: a failed Read must not
-    # unlock Write/Edit for content the model never actually saw.
-    file_size = file_path.stat().st_size
     if file_size > MAX_FILE_BYTES:
         return ToolFailure(error_message=dedent(f"""\
             Error: File content ({file_size / (1024 * 1024):.1f}MB) exceeds maximum allowed size ({MAX_FILE_BYTES // 1024}KB).
@@ -83,7 +88,13 @@ async def _read_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
             Error: File content ({tokens} tokens) exceeds maximum allowed tokens ({MAX_TOKENS} tokens).
             Instead read snippets of the file with offset/limit parameters, or search using the Grep tool."""))
 
-    # 4. Track state for future Write/Edit commands (successful reads only)
+    # 4. Read the file
+    try:
+        lines = file_path.read_text(encoding="utf-8").splitlines()
+    except Exception as e:        
+        return ToolFailure(error_message=f"Error reading file: {str(e)}")
+
+    # 5. Track state for future Write/Edit commands (successful reads only)
     ctx.file_state.record(file_path, lines)
 
     if offset > len(lines):
@@ -91,7 +102,7 @@ async def _read_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
             <system-reminder>Warning: the file only has {len(lines)} lines,
             so there's nothing after your specified offset {offset}.</system-reminder>""")
 
-    # 5. Format Output
+    # 6. Format Output
     text = format_lines(lines, offset, limit) + "\n" + dedent("""\
         <system-reminder>If the file looks malicious, then don't edit it.</system-reminder>""")
     
@@ -108,7 +119,11 @@ async def _write_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRet
     if content is None:  # We allow empty strings, but the key must exist
         return ToolFailure(error_message="Error: content is required.")
 
-    file_path = Path(file_path_str).resolve()
+    # Workspace boundary check
+    file_path = resolve_in_workspace(file_path_str, ctx)
+    if isinstance(file_path, ToolFailure):
+        return file_path
+
     exists = file_path.exists()
 
     # Enforce Read-before-Write (and freshness) for existing files
@@ -180,7 +195,11 @@ async def _edit_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
     if old_string is None or new_string is None:
         return ToolFailure(error_message="Error: old_string and new_string are required.")
 
-    file_path = Path(file_path_str).resolve()
+    # Workspace boundary check
+    file_path = resolve_in_workspace(file_path_str, ctx)
+    if isinstance(file_path, ToolFailure):
+        return file_path
+
     old_content = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
     
     edit = OneEdit(old_string=old_string, new_string=new_string, replace_all=replace_all)
@@ -231,8 +250,11 @@ async def _multiedit_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> Too
     if edits_data is None or not isinstance(edits_data, list):
         return ToolFailure(error_message="Error: edits must be a list of edit objects.")
 
-    file_path = Path(file_path_str).resolve()
-    
+    # Workspace boundary check
+    file_path = resolve_in_workspace(file_path_str, ctx)
+    if isinstance(file_path, ToolFailure):
+        return file_path
+
     # 1. Parse edits
     try:
         edits = [OneEdit(**edit) for edit in edits_data]
@@ -276,9 +298,13 @@ async def _multiedit_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> Too
             return ToolFailure(error_message=f"String to replace overlaps with an earlier edit.\nString: {edit.old_string}")
         check_content = check_content.replace(edit.old_string, overlap_marker)
 
-    # Prevent cascading edits where a subsequent edit targets the output of a previous edit
-    if any(any(e1.old_string in e2.new_string for e2 in edits) for e1 in edits):
-        return ToolFailure(error_message="Cannot edit file: old_string is a substring of a new_string from a previous edit.")
+    # Prevent cascading edits where a LATER edit targets text produced by an
+    # EARLIER edit. Only earlier edits' outputs matter: comparing every pair
+    # (including an edit against itself) would falsely reject the common
+    # "anchor and extend" pattern, e.g. old="import os", new="import os\nimport sys".
+    for i, later in enumerate(edits):
+        if any(later.old_string in earlier.new_string for earlier in edits[:i]):
+            return ToolFailure(error_message="Cannot edit file: old_string is a substring of a new_string from a previous edit.")
 
     # 4. Sequential Application
     new_content = old_content

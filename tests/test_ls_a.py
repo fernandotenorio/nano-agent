@@ -352,12 +352,19 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
     # SYMLINKS
     # ---------------------------------------------------------
 
+    def _symlink_or_skip(self, target, link, **kwargs):
+        """os.symlink can fail on Windows without elevated privileges."""
+        try:
+            os.symlink(target, link, **kwargs)
+        except (OSError, NotImplementedError):
+            self.skipTest("Symlink creation unavailable")
+
     @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unavailable")
     async def test_symlink_to_file(self):
         target = self._create_file("real.txt")
 
         link = self.base_path / "link.txt"
-        os.symlink(target, link)
+        self._symlink_or_skip(target, link)
 
         result = await fs._ls_impl(
             {"path": str(link)},
@@ -372,7 +379,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         target = self.base_path / "missing.txt"
         link = self.base_path / "broken.txt"
 
-        os.symlink(target, link)
+        self._symlink_or_skip(target, link)
 
         result = await fs._ls_impl(
             {"path": str(link)},
@@ -388,7 +395,7 @@ class TestLsTool(unittest.IsolatedAsyncioTestCase):
         self._create_file("real/file.txt")
 
         link = self.base_path / "dirlink"
-        os.symlink(real_dir, link)
+        self._symlink_or_skip(real_dir, link, target_is_directory=True)
 
         result = await fs._ls_impl(
             {

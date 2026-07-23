@@ -308,8 +308,8 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("vendor/lib1/core.py", result)
         self.assertNotIn("vendor/lib2/utils.py", result)
         
-    async def test_out_of_workspace_fallback(self):
-        """Ensure paths entirely outside the workspace gracefully fall back to not being ignored."""
+    async def test_out_of_workspace_denied(self):
+        """Ensure paths entirely outside the workspace are denied by the boundary check."""
         # Create a temp dir outside of our current workspace context
         with tempfile.TemporaryDirectory() as external_dir:
             ext_path = Path(external_dir).resolve()
@@ -317,12 +317,6 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
             # Create a file inside this external directory
             ext_file = ext_path / "external.txt"
             ext_file.write_text("data")
-            
-            # Create a directory that WOULD be ignored if it were in the workspace (.git)
-            git_dir = ext_path / ".git"
-            git_dir.mkdir()
-            git_file = git_dir / "config"
-            git_file.write_text("core")
 
             # Run glob on the external directory
             result = await _glob_impl({
@@ -330,13 +324,12 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
                 "path": str(ext_path)
             }, self.ctx)
             
-            self.assertIsInstance(result, str)
-            # Because it is out of the workspace, IgnoreMatcher throws ValueError internally 
-            # and gracefully defaults to returning False (i.e. DO NOT ignore).
-            self.assertIn("external.txt", result)
-            
-            # The out-of-workspace .git folder is actually scanned because it bypassed the workspace IgnoreMatcher
-            self.assertIn(os.path.join(".git", "config").replace("\\", "/"), result.replace("\\", "/"))
+            # The workspace boundary must reject the search outright:
+            # nothing outside the workspace may be listed (filtered or not).
+            self.assertIsInstance(result, ToolFailure)
+            self.assertIn("outside", result.error_message)
+            self.assertIn("Access denied", result.error_message)
+            self.assertNotIn("external.txt", result.error_message)
 
 
     # ---------------------------------------------------------

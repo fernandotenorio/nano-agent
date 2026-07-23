@@ -66,6 +66,23 @@ class IgnoreMatcher:
             patterns,
         )
 
+    def ignores(self, path: Path, *, is_dir: bool) -> bool:
+        """
+        Returns True if an absolute path should be ignored.
+
+        The path is relativized against the workspace root before matching.
+        Paths that fall outside the workspace are always ignored (fail-closed):
+        tools enforce the workspace boundary before walking, so this case
+        should be unreachable — but if it ever happens, we must not expose
+        unfiltered content from outside the workspace.
+        """
+        try:
+            rel_path = path.absolute().relative_to(self.workspace)
+        except ValueError:
+            return True
+
+        return self.ignores_relative(rel_path.as_posix(), is_dir=is_dir)
+
     def ignores_relative(
         self,
         relative_path: str,

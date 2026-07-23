@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 from pathlib import Path
@@ -208,6 +208,14 @@ class TestExecuteToolGroup2(unittest.IsolatedAsyncioTestCase):
             tool_name=self.tu.name, tool_input=self.tu.input, tool_output=""
         )
 
+        # 4. Policy and context (now required by execute_tool)
+        self.policy = AgentPolicy()
+        self.ctx = InvocationContext(
+            workspace=Path("/mock/workspace"),
+            cwd=Path("/mock/workspace"),
+            workspace_is_git_repo=False
+        )
+
     @patch("builtins.print")
     async def test_standard_tool_success(self, mock_print):
         """
@@ -219,7 +227,7 @@ class TestExecuteToolGroup2(unittest.IsolatedAsyncioTestCase):
         self.registry.invoke.return_value = "Normal tool execution output."
 
         # Action
-        result = await execute_tool(self.tu, self.registry, self.hooks, self.transcript_path, self.model)
+        result = await execute_tool(self.tu, self.registry, self.hooks, self.transcript_path, self.model, self.policy, self.ctx)
 
         # Assertions
         self.assertEqual(len(result), 1)
@@ -245,7 +253,7 @@ class TestExecuteToolGroup2(unittest.IsolatedAsyncioTestCase):
         )
 
         # Action
-        result = await execute_tool(self.tu, self.registry, self.hooks, self.transcript_path, self.model)
+        result = await execute_tool(self.tu, self.registry, self.hooks, self.transcript_path, self.model, self.policy, self.ctx)
 
         # Assertions
         self.registry.invoke.assert_not_called()  # Tool never executed!
@@ -266,7 +274,7 @@ class TestExecuteToolGroup2(unittest.IsolatedAsyncioTestCase):
         self.registry.invoke.side_effect = ValueError("Corrupted JSON payload")
 
         # Action
-        result = await execute_tool(self.tu, self.registry, self.hooks, self.transcript_path, self.model)
+        result = await execute_tool(self.tu, self.registry, self.hooks, self.transcript_path, self.model, self.policy, self.ctx)
 
         # Assertions
         self.assertEqual(len(result), 1)
@@ -288,7 +296,7 @@ class TestExecuteToolGroup2(unittest.IsolatedAsyncioTestCase):
         self.registry.invoke.return_value = ToolFailure(error_message="File not found on disk.")
 
         # Action
-        result = await execute_tool(self.tu, self.registry, self.hooks, self.transcript_path, self.model)
+        result = await execute_tool(self.tu, self.registry, self.hooks, self.transcript_path, self.model, self.policy, self.ctx)
 
         # Assertions
         self.assertEqual(len(result), 1)
@@ -317,7 +325,7 @@ class TestExecuteToolGroup2(unittest.IsolatedAsyncioTestCase):
         )
 
         # Action
-        result = await execute_tool(self.tu, self.registry, self.hooks, self.transcript_path, self.model)
+        result = await execute_tool(self.tu, self.registry, self.hooks, self.transcript_path, self.model, self.policy, self.ctx)
 
         # Assertions
         self.assertEqual(len(result), 2)
@@ -340,6 +348,11 @@ class TestHandleShellGroup3(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         self.callback = ShellCallback(command="echo 'test'", timeout=0.1)
+        self.ctx = InvocationContext(
+            workspace=Path("/mock/workspace"),
+            cwd=Path("/mock/workspace"),
+            workspace_is_git_repo=False
+        )
 
     def _create_mock_process(self, stdout_data: bytes, stderr_data: bytes, exit_code: int = 0, hang_time: float = 0):
         """Helper to create a fake asyncio subprocess with pre-filled streams."""
@@ -381,7 +394,7 @@ class TestHandleShellGroup3(unittest.IsolatedAsyncioTestCase):
         mock_create_shell.return_value = mock_process
         
         # Action
-        text, is_error = await handle_shell(self.callback)
+        text, is_error = await handle_shell(self.callback, self.ctx)
         
         # Assertions
         self.assertFalse(is_error)
@@ -389,7 +402,8 @@ class TestHandleShellGroup3(unittest.IsolatedAsyncioTestCase):
         mock_create_shell.assert_called_once_with(
             self.callback.command,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(self.ctx.cwd)
         )
 
     @patch("builtins.print")
@@ -404,7 +418,7 @@ class TestHandleShellGroup3(unittest.IsolatedAsyncioTestCase):
         mock_create_shell.return_value = mock_process
         
         # Action
-        text, is_error = await handle_shell(self.callback)
+        text, is_error = await handle_shell(self.callback, self.ctx)
         
         # Assertions
         self.assertTrue(is_error)
@@ -424,7 +438,7 @@ class TestHandleShellGroup3(unittest.IsolatedAsyncioTestCase):
         mock_create_shell.return_value = mock_process
         
         # Action
-        text, is_error = await handle_shell(self.callback)
+        text, is_error = await handle_shell(self.callback, self.ctx)
         
         # Assertions
         self.assertFalse(is_error)
@@ -444,7 +458,7 @@ class TestHandleShellGroup3(unittest.IsolatedAsyncioTestCase):
         mock_create_shell.return_value = mock_process
         
         # Action
-        text, is_error = await handle_shell(self.callback)
+        text, is_error = await handle_shell(self.callback, self.ctx)
         
         # Assertions
         self.assertTrue(is_error)
@@ -468,7 +482,7 @@ class TestHandleShellGroup3(unittest.IsolatedAsyncioTestCase):
         mock_create_shell.return_value = mock_process
         
         # Action
-        text, is_error = await handle_shell(self.callback)
+        text, is_error = await handle_shell(self.callback, self.ctx)
         
         # Assertions
         self.assertFalse(is_error)
@@ -495,9 +509,13 @@ class TestHandleSubagentGroup4(unittest.IsolatedAsyncioTestCase):
 
         # handle_subagent rebuilds the registry from the sub-agent's context,
         # so we patch the factory rather than passing a parent registry.
+        # It always strips Task/SubmitPlan first (clone_excluding), then
+        # optionally applies the profile's tool filter (clone_filtered).
         self.built_registry = MagicMock()
+        self.excluded_registry = MagicMock()
+        self.built_registry.clone_excluding.return_value = self.excluded_registry
         self.filtered_registry = MagicMock()
-        self.built_registry.clone_filtered.return_value = self.filtered_registry
+        self.excluded_registry.clone_filtered.return_value = self.filtered_registry
 
         # Keep the built-in setup hook from touching the real filesystem
         self.gather_patcher = patch("hooks.gather_context_files", return_value="")
@@ -601,7 +619,9 @@ class TestHandleSubagentGroup4(unittest.IsolatedAsyncioTestCase):
         await handle_subagent(callback, self.ctx, self.parent_path, self.model)
 
         # Assertions
-        self.built_registry.clone_filtered.assert_called_once_with(["Read", "Shell"])
+        # Task/SubmitPlan are always stripped first, then the profile filter applies
+        self.built_registry.clone_excluding.assert_called_once_with(["Task", "SubmitPlan"])
+        self.excluded_registry.clone_filtered.assert_called_once_with(["Read", "Shell"])
         
         # Verify the restricted registry was passed to the sub-agent loop
         called_registry = mock_run_agentic_loop.call_args[0][1]
@@ -627,11 +647,13 @@ class TestHandleSubagentGroup4(unittest.IsolatedAsyncioTestCase):
         await handle_subagent(callback, self.ctx, self.parent_path, self.model)
 
         # Assertions
-        self.built_registry.clone_filtered.assert_not_called()
+        # Even with tools=None, Task/SubmitPlan are always stripped
+        self.built_registry.clone_excluding.assert_called_once_with(["Task", "SubmitPlan"])
+        self.excluded_registry.clone_filtered.assert_not_called()
         
-        # Verify the freshly built registry was passed unfiltered
+        # Verify the registry (minus Task/SubmitPlan) was passed with no further filtering
         called_registry = mock_run_agentic_loop.call_args[0][1]
-        self.assertEqual(called_registry, self.built_registry)
+        self.assertEqual(called_registry, self.excluded_registry)
 
 
 class MockTranscriptState:

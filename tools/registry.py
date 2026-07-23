@@ -34,6 +34,11 @@ class ToolRegistry:
                 new_reg._readonly_flags[name] = self._readonly_flags[name]
         return new_reg
 
+    def clone_excluding(self, excluded_tools: list[str]) -> 'ToolRegistry':
+        """Creates a new registry without the excluded tools."""
+        allowed = [name for name in self._callables if name not in excluded_tools]
+        return self.clone_filtered(allowed)
+
     def clone_readonly(self) -> 'ToolRegistry':
         """Creates a new registry containing ONLY read-only tools."""
         allowed = [name for name, is_ro in self._readonly_flags.items() if is_ro]

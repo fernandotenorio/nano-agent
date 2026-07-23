@@ -7,6 +7,7 @@ import time
 import json
 import uuid
 import asyncio
+import hashlib
 import itertools
 from pathlib import Path
 from typing import Any, Awaitable, TypeVar, Union
@@ -154,7 +155,22 @@ def parse_assistant_response(response: Any) -> AssistantMessage:
     if message.content:
         content.append(TextMessageContent(type="text", text=message.content))
 
-    if hasattr(message, 'reasoning_content') and message.reasoning_content:
+    # Thinking content: prefer structured thinking_blocks (they carry
+    # signatures); only fall back to reasoning_content when no blocks exist.
+    # Appending both would duplicate the same thinking text, since providers
+    # like Anthropic populate both fields with identical content.
+    thinking_blocks = [
+        t for t in (getattr(message, 'thinking_blocks', None) or [])
+        if isinstance(t, dict) and 'thinking' in t
+    ]
+    if thinking_blocks:
+        for thinking in thinking_blocks:
+            content.append(ThinkingMessageContent(
+                type="thinking",
+                thinking=thinking['thinking'],
+                signature=thinking.get('signature', '')
+            ))
+    elif getattr(message, 'reasoning_content', None):
         content.append(ThinkingMessageContent(type="thinking", thinking=message.reasoning_content, signature=""))
 
     for tool_call in (getattr(message, 'tool_calls', None) or []):
@@ -171,14 +187,6 @@ def parse_assistant_response(response: Any) -> AssistantMessage:
             name=str(tool_call.function.name),
             input=tool_args
         ))
-
-    for thinking in (getattr(message, 'thinking_blocks', None) or []):
-        if isinstance(thinking, dict) and 'thinking' in thinking:
-            content.append(ThinkingMessageContent(
-                type="thinking",
-                thinking=thinking['thinking'],
-                signature=thinking.get('signature', '')
-            ))
 
     usage_dict = None
     if isinstance(usage, litellm.types.utils.Usage):
@@ -208,7 +216,9 @@ async def acompletion(
     is_anthropic = model.startswith("anthropic/") or model.startswith("claude")
     is_ollama = model.startswith("ollama/") or model.startswith("ollama_chat/")
 
-    openai_prompt_cache_key = str(hash(str(Path.cwd())))
+    # Stable per-directory cache key. Python's built-in hash() is randomized
+    # per process, which would defeat session affinity across restarts.
+    openai_prompt_cache_key = hashlib.sha256(str(Path.cwd()).encode("utf-8")).hexdigest()
 
     # Build formatted OpenAI messages list
     formatted_messages: list[dict[str, Any]] = []
