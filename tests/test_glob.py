@@ -132,7 +132,8 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(result, str)
         
         # Count occurrences of the file path in the result string
-        occurrences = result.split("\n").count(str(file1))
+        # (results are absolute paths)
+        occurrences = result.split("\n").count(str(self.base_path / file1))
         self.assertEqual(occurrences, 1)
 
     # ---------------------------------------------------------
@@ -150,10 +151,10 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
         
         lines = result.split("\n")
         self.assertEqual(len(lines), 3)
-        # Should be sorted newest to oldest
-        self.assertEqual(lines[0], str(newest))
-        self.assertEqual(lines[1], str(middle))
-        self.assertEqual(lines[2], str(oldest))
+        # Should be sorted newest to oldest, returned as absolute paths
+        self.assertEqual(lines[0], str(self.base_path / newest))
+        self.assertEqual(lines[1], str(self.base_path / middle))
+        self.assertEqual(lines[2], str(self.base_path / oldest))
 
     @patch("tools.filesearch.MAX_GLOB_RESULTS", 2)
     async def test_truncation(self):
@@ -168,10 +169,34 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
         lines = result.split("\n")
         # 2 files + 1 truncation warning message = 3 lines
         self.assertEqual(len(lines), 3)
-        self.assertEqual(lines[0], str(newest1))
-        self.assertEqual(lines[1], str(newest2))
+        self.assertEqual(lines[0], str(self.base_path / newest1))
+        self.assertEqual(lines[1], str(self.base_path / newest2))
         self.assertNotIn(str(oldest3), result)
         self.assertIn("Results are truncated", lines[2])
+
+    async def test_results_round_trip_into_read(self):
+        """Glob results must be absolute paths that Read accepts directly,
+        even when the search base is a subdirectory (the old base-relative
+        output silently resolved against the wrong directory)."""
+        from tools.filesystem import _read_impl
+
+        file_path = self.base_path / "sub" / "notes.txt"
+        file_path.parent.mkdir(parents=True)
+        file_path.write_text("round-trip content", encoding="utf-8")
+
+        result = await _glob_impl({
+            "pattern": "*.txt",
+            "path": str(self.base_path / "sub")
+        }, self.ctx)
+        self.assertIsInstance(result, str)
+
+        returned_path = result.split("\n")[0]
+        self.assertTrue(Path(returned_path).is_absolute())
+
+        # Feed the returned line straight into Read
+        read_result = await _read_impl({"file_path": returned_path}, self.ctx)
+        self.assertIsInstance(read_result, str)
+        self.assertIn("round-trip content", read_result)
 
     async def test_unstatable_file_graceful_handling(self):
         import inspect

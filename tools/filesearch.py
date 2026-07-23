@@ -120,7 +120,11 @@ async def _glob_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
                             mtime = 0.0
 
                         total_matches += 1
-                        item = (mtime, rel_path)
+                        # Store the ABSOLUTE path: results must round-trip
+                        # directly into Read/Edit (whose schemas expect
+                        # absolute paths), regardless of the search base.
+                        # entry.path is absolute because base_path is resolved.
+                        item = (mtime, entry.path)
 
                         if len(heap) < MAX_GLOB_RESULTS:
                             heapq.heappush(heap, item)
@@ -325,6 +329,11 @@ def register_fsearch_tools(registry: ToolRegistry, ctx: InvocationContext):
 
             Use this when searching by file name, as it avoids reading
             file contents and is significantly more efficient.
+
+            Results are absolute paths, sorted newest first. You can pass them
+            directly to the Read/Edit tools.
+
+            The pattern itself is matched relative to the searched directory.
 
             Use the `exclude` parameter to skip directories or file patterns that are
             not relevant (e.g. 'node_modules/**', 'vendor/**', '**/*.min.js')."""),
