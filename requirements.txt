@@ -2,3 +2,4 @@ pydantic==2.13.4
 litellm==1.91.1
 python-dotenv==1.2.2
 wcmatch==11.0
+pathspec==1.1.1

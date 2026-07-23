@@ -14,7 +14,7 @@ from typedefs import (
 from hooks import PreToolUseEvent, PostToolUseEvent, UserPromptEvent
 from agent import run_agentic_loop
 from agent import execute_tool, handle_shell, handle_subagent, main
-from sessioncontext import AgentPolicy, AgentMode
+from sessioncontext import AgentPolicy, AgentMode, InvocationContext
 
 
 class TestAgenticLoopGroup1(unittest.IsolatedAsyncioTestCase):
@@ -41,6 +41,13 @@ class TestAgenticLoopGroup1(unittest.IsolatedAsyncioTestCase):
         # Policy
         self.policy = AgentPolicy()
         self.policy.mode = AgentMode.BUILD
+
+        # Invocation context (carries the per-agent file-state tracker)
+        self.ctx = InvocationContext(
+            workspace=Path("/mock/workspace"),
+            cwd=Path("/mock/workspace"),
+            workspace_is_git_repo=False
+        )
         
         # 4. Standard vars
         self.model = "test-mock-model"
@@ -63,7 +70,7 @@ class TestAgenticLoopGroup1(unittest.IsolatedAsyncioTestCase):
         )
 
         # Action
-        result = await run_agentic_loop(self.transcript, self.registry, self.hooks, self.model, self.policy)
+        result = await run_agentic_loop(self.transcript, self.registry, self.hooks, self.model, self.policy, self.ctx)
 
         # Assertions
         self.assertEqual(result, [text_block])
@@ -101,7 +108,7 @@ class TestAgenticLoopGroup1(unittest.IsolatedAsyncioTestCase):
         mock_execute_tool.return_value = [tool_result]
 
         # Action
-        result = await run_agentic_loop(self.transcript, self.registry, self.hooks, self.model, self.policy)
+        result = await run_agentic_loop(self.transcript, self.registry, self.hooks, self.model, self.policy, self.ctx)
 
         # Assertions
         # Loop exited correctly with the final text
@@ -113,7 +120,7 @@ class TestAgenticLoopGroup1(unittest.IsolatedAsyncioTestCase):
         
         # Tool executed exactly once with correct parameters
         mock_execute_tool.assert_called_once_with(
-            tool_use, self.registry, self.hooks, self.transcript.file_path, model=self.model, policy=self.policy
+            tool_use, self.registry, self.hooks, self.transcript.file_path, model=self.model, policy=self.policy, ctx=self.ctx
         )
         
         # Transcript should have 3 appends: msg1, UserMessage(ToolResult), msg2
@@ -156,7 +163,7 @@ class TestAgenticLoopGroup1(unittest.IsolatedAsyncioTestCase):
         mock_execute_tool.side_effect = [[tr1], [tr2], [tr3]]
 
         # Action
-        result = await run_agentic_loop(self.transcript, self.registry, self.hooks, self.model, self.policy)
+        result = await run_agentic_loop(self.transcript, self.registry, self.hooks, self.model, self.policy, self.ctx)
 
         # Assertions
         # execute_tool was called exactly 3 times
@@ -471,30 +478,33 @@ class TestHandleShellGroup3(unittest.IsolatedAsyncioTestCase):
 class TestHandleSubagentGroup4(unittest.IsolatedAsyncioTestCase):
     """
     Test Group 4: Recursive Sub-Agent Handler (handle_subagent)
-    Validates sub-agent filesystem initialization, system prompt injection, 
-    and tool restriction filtering.
+    Validates sub-agent transcript initialization, system prompt injection,
+    tool restriction filtering, and file-state isolation from the parent.
     """
 
     def setUp(self):
         self.parent_path = Path("/mock/dir/parent_transcript.jsonl")
         self.model = "test-model"
-        
-        # Mock Parent Registry
-        self.parent_registry = MagicMock()
-        self.cloned_registry = MagicMock()
-        self.parent_registry.clone_filtered.return_value = self.cloned_registry
-        
-        # Mock Hook Manager
-        self.hooks = MagicMock()
-        
-        # We must mock trigger_user_prompt as an AsyncMock 
-        # and ensure it returns a valid UserPromptEvent payload.
-        from hooks import UserPromptEvent
-        self.hooks.trigger_user_prompt = AsyncMock(
-            side_effect=lambda prompt, is_first_prompt: UserPromptEvent(
-                prompt=prompt, is_first_prompt=is_first_prompt
-            )
+
+        # Parent invocation context (carries the parent's file-state tracker)
+        self.ctx = InvocationContext(
+            workspace=Path("/mock/workspace"),
+            cwd=Path("/mock/workspace"),
+            workspace_is_git_repo=False
         )
+
+        # handle_subagent rebuilds the registry from the sub-agent's context,
+        # so we patch the factory rather than passing a parent registry.
+        self.built_registry = MagicMock()
+        self.filtered_registry = MagicMock()
+        self.built_registry.clone_filtered.return_value = self.filtered_registry
+
+        # Keep the built-in setup hook from touching the real filesystem
+        self.gather_patcher = patch("hooks.gather_context_files", return_value="")
+        self.gather_patcher.start()
+
+    def tearDown(self):
+        self.gather_patcher.stop()
 
     def _create_callback(self, tools: list[str] | None = None) -> AgentCallback:
         """Helper to create a sub-agent callback payload."""
@@ -508,17 +518,20 @@ class TestHandleSubagentGroup4(unittest.IsolatedAsyncioTestCase):
 
     @patch("builtins.print")
     @patch("agent.uuid.uuid4")
+    @patch("agent.create_core_registry")
     @patch("agent.Transcript")
     @patch("agent.run_agentic_loop", new_callable=AsyncMock)
     async def test_proper_sub_agent_initialization(
-        self, mock_run_agentic_loop, mock_transcript_class, mock_uuid, mock_print
+        self, mock_run_agentic_loop, mock_transcript_class, mock_create_registry, mock_uuid, mock_print
     ):
         """
         Test 4.1: Proper Sub-Agent Initialization
-        Verifies transcript file generation and initial message injection.
+        Verifies transcript file generation, initial message injection, and
+        that the sub-agent runs on an isolated context with an empty tracker.
         """
         # Setup
         mock_uuid.return_value = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        mock_create_registry.return_value = self.built_registry
         callback = self._create_callback()
         
         mock_transcript_instance = MagicMock()
@@ -526,9 +539,12 @@ class TestHandleSubagentGroup4(unittest.IsolatedAsyncioTestCase):
         
         mock_run_agentic_loop.return_value = [TextMessageContent(text="Sub-agent done.")]
 
+        # Give the parent tracker some state to prove the sub-agent doesn't inherit it
+        self.ctx.file_state.known[Path("/mock/workspace/parent_read.py")] = MagicMock()
+
         # Action
         result, is_error = await handle_subagent(
-            callback, self.parent_registry, self.hooks, self.parent_path, self.model
+            callback, self.ctx, self.parent_path, self.model
         )
 
         # Assertions
@@ -550,53 +566,72 @@ class TestHandleSubagentGroup4(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(user_msg, UserMessage)
         self.assertEqual(user_msg.content[0].text, "Here is the code to review.")
 
+        # 3. Verify context isolation: the loop got a *clone* with an empty tracker
+        sub_ctx = mock_run_agentic_loop.call_args.kwargs["ctx"]
+        self.assertIsNot(sub_ctx, self.ctx)
+        self.assertIsNot(sub_ctx.file_state, self.ctx.file_state)
+        self.assertEqual(sub_ctx.file_state.known, {})
+        self.assertEqual(sub_ctx.workspace, self.ctx.workspace)
+
+        # The registry was built from the sub-agent's context, not the parent's
+        mock_create_registry.assert_called_once_with(sub_ctx)
+
+        # The sub-agent got its own HookManager, not the parent's
+        from hooks import HookManager
+        sub_hooks = mock_run_agentic_loop.call_args[0][2]
+        self.assertIsInstance(sub_hooks, HookManager)
+
     @patch("builtins.print")
+    @patch("agent.create_core_registry")
     @patch("agent.Transcript")
     @patch("agent.run_agentic_loop", new_callable=AsyncMock)
     async def test_tool_filtering_restricted_profile(
-        self, mock_run_agentic_loop, mock_transcript_class, mock_print
+        self, mock_run_agentic_loop, mock_transcript_class, mock_create_registry, mock_print
     ):
         """
         Test 4.2: Tool Filtering (Restricted Profile)
-        If the callback specifies a tools list, the sub-agent should get a cloned, 
-        filtered registry.
+        If the callback specifies a tools list, the sub-agent should get a
+        filtered version of its freshly built registry.
         """
         # Setup: Restrict to only "Read" and "Shell"
+        mock_create_registry.return_value = self.built_registry
         callback = self._create_callback(tools=["Read", "Shell"])
 
         # Action
-        await handle_subagent(callback, self.parent_registry, self.hooks, self.parent_path, self.model)
+        await handle_subagent(callback, self.ctx, self.parent_path, self.model)
 
         # Assertions
-        self.parent_registry.clone_filtered.assert_called_once_with(["Read", "Shell"])
+        self.built_registry.clone_filtered.assert_called_once_with(["Read", "Shell"])
         
-        # Verify the restricted registry was passed to the sub-agent loop, NOT the parent
+        # Verify the restricted registry was passed to the sub-agent loop
         called_registry = mock_run_agentic_loop.call_args[0][1]
-        self.assertEqual(called_registry, self.cloned_registry)
+        self.assertEqual(called_registry, self.filtered_registry)
 
     @patch("builtins.print")
+    @patch("agent.create_core_registry")
     @patch("agent.Transcript")
     @patch("agent.run_agentic_loop", new_callable=AsyncMock)
     async def test_unfiltered_tools_default_profile(
-        self, mock_run_agentic_loop, mock_transcript_class, mock_print
+        self, mock_run_agentic_loop, mock_transcript_class, mock_create_registry, mock_print
     ):
         """
         Test 4.3: Unfiltered Tools (Default Profile)
-        If the callback does not restrict tools (tools=None), it should inherit 
-        the parent registry exactly as is.
+        If the callback does not restrict tools (tools=None), the sub-agent
+        uses its freshly built registry unfiltered.
         """
         # Setup: tools = None
+        mock_create_registry.return_value = self.built_registry
         callback = self._create_callback(tools=None)
 
         # Action
-        await handle_subagent(callback, self.parent_registry, self.hooks, self.parent_path, self.model)
+        await handle_subagent(callback, self.ctx, self.parent_path, self.model)
 
         # Assertions
-        self.parent_registry.clone_filtered.assert_not_called()
+        self.built_registry.clone_filtered.assert_not_called()
         
-        # Verify the original parent registry was passed
+        # Verify the freshly built registry was passed unfiltered
         called_registry = mock_run_agentic_loop.call_args[0][1]
-        self.assertEqual(called_registry, self.parent_registry)
+        self.assertEqual(called_registry, self.built_registry)
 
 
 class MockTranscriptState:

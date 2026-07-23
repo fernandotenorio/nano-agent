@@ -8,13 +8,31 @@ from textwrap import dedent
 from typing import Any
 from tools.registry import ToolRegistry, ToolReturnType
 from sessioncontext import InvocationContext
+from filestate import MAX_FILE_BYTES, FileStateTracker
 
 MAX_TOKENS: int = 24000
-MAX_FILE_BYTES: int = 256 * 1024
 
-# State tracking for the agentic loop to enforce Read-before-Write
-known_content_files: dict[Path, list[str] | None] = {}
-stale_content_files: set[Path] = set()
+# Read-before-write state lives on ctx.file_state (one tracker per agent loop);
+# see filestate.FileStateTracker. Freshness is verified on demand at the write
+# gate below and at each user prompt (filestate.file_changes_hook).
+
+_NOT_READ_ERROR = dedent("""\
+    Error: File has not been read yet.
+    Read it first before writing to it.""")
+
+_STALE_ERROR = dedent("""\
+    Error: File has been modified on disk since you last read it.
+    Read it again before writing to it.""")
+
+
+def _freshness_error(tracker: FileStateTracker, file_path: Path) -> str | None:
+    """Returns a gate error message if `file_path` may not be safely written, else None."""
+    status = tracker.status(file_path)
+    if status == "unknown":
+        return _NOT_READ_ERROR
+    if status == "stale":
+        return _STALE_ERROR
+    return None
 
 def format_lines(lines: list[str], offset: int = 1, limit: int = 2000) -> str:
     """Pretty-prints lines with 1-based line numbers (e.g. '   12→ code')."""
@@ -50,12 +68,9 @@ async def _read_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
     except Exception as e:        
         return ToolFailure(error_message=f"Error reading file: {str(e)}")
 
-    # 3. Track state for future Write/Edit commands
+    # 3. Enforce constraints BEFORE tracking state: a failed Read must not
+    # unlock Write/Edit for content the model never actually saw.
     file_size = file_path.stat().st_size
-    known_content_files[file_path] = lines if file_size < MAX_FILE_BYTES else None
-    stale_content_files.discard(file_path)
-
-    # 4. Enforce constraints
     if file_size > MAX_FILE_BYTES:
         return ToolFailure(error_message=dedent(f"""\
             Error: File content ({file_size / (1024 * 1024):.1f}MB) exceeds maximum allowed size ({MAX_FILE_BYTES // 1024}KB).
@@ -67,6 +82,9 @@ async def _read_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
         return ToolFailure(error_message=dedent(f"""\
             Error: File content ({tokens} tokens) exceeds maximum allowed tokens ({MAX_TOKENS} tokens).
             Instead read snippets of the file with offset/limit parameters, or search using the Grep tool."""))
+
+    # 4. Track state for future Write/Edit commands (successful reads only)
+    ctx.file_state.record(file_path, lines)
 
     if offset > len(lines):
         return dedent(f"""\
@@ -93,20 +111,19 @@ async def _write_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRet
     file_path = Path(file_path_str).resolve()
     exists = file_path.exists()
 
-    # Enforce Read-before-Write for existing files
-    if exists and (file_path not in known_content_files or file_path in stale_content_files):
-        return ToolFailure(error_message=dedent("""\
-            Error: File has not been read yet.
-            Read it first before writing to it."""))
-    
+    # Enforce Read-before-Write (and freshness) for existing files
+    if exists:
+        gate_error = _freshness_error(ctx.file_state, file_path)
+        if gate_error:
+            return ToolFailure(error_message=gate_error)
+
     try:
         file_path.write_text(content, encoding="utf-8")
     except Exception as e:
         return ToolFailure(error_message=f"Error writing to file: {str(e)}")
 
-    # Update state trackers
-    known_content_files[file_path] = content.splitlines()
-    stale_content_files.discard(file_path)
+    # Record the new on-disk state so our own write never appears stale
+    ctx.file_state.record(file_path, content.splitlines() if len(content) < MAX_FILE_BYTES else None)
 
     # Format the response back to the LLM
     if exists:
@@ -125,7 +142,7 @@ class OneEdit(pydantic.BaseModel):
     new_string: str
     replace_all: bool = False
 
-def one_edit_check(file_path: Path, old_content: str, edit: OneEdit) -> str | None:
+def one_edit_check(file_path: Path, old_content: str, edit: OneEdit, tracker: FileStateTracker) -> str | None:
     """Validates the edit operation and checks for read-before-edit constraints."""
     exists = file_path.exists()
     count = old_content.count(edit.old_string)
@@ -134,8 +151,8 @@ def one_edit_check(file_path: Path, old_content: str, edit: OneEdit) -> str | No
         return "WRITE"
     elif not exists:
         return "File does not exist."
-    elif file_path not in known_content_files or file_path in stale_content_files:
-        return "Error: File has not been read yet. Read it first before writing to it."
+    elif (gate_error := _freshness_error(tracker, file_path)) is not None:
+        return gate_error
     elif edit.old_string == edit.new_string:
         return "No changes to make: old_string and new_string are exactly the same."
     elif count == 0:
@@ -167,7 +184,7 @@ async def _edit_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
     old_content = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
     
     edit = OneEdit(old_string=old_string, new_string=new_string, replace_all=replace_all)
-    error = one_edit_check(file_path, old_content, edit)
+    error = one_edit_check(file_path, old_content, edit, ctx.file_state)
     
     # 1. Fallback to WRITE
     if error == "WRITE":
@@ -185,8 +202,9 @@ async def _edit_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
         file_path.write_text(new_content, encoding="utf-8")
     except Exception as e:
         return ToolFailure(error_message=f"Error writing to file: {str(e)}")
-        
-    known_content_files[file_path] = new_content.splitlines() if len(new_content) < MAX_FILE_BYTES else None
+
+    # Record the new on-disk state so our own edit never appears stale
+    ctx.file_state.record(file_path, new_content.splitlines() if len(new_content) < MAX_FILE_BYTES else None)
 
     # 4. Format LLM Context Output
     if replace_all:
@@ -230,11 +248,10 @@ async def _multiedit_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> Too
     if not file_path.exists():
         return ToolFailure(error_message="Error: file does not exist.")
 
-    # Enforce Read-before-Write
-    if file_path not in known_content_files or file_path in stale_content_files:
-        return ToolFailure(error_message=dedent("""\
-            Error: File has not been read yet.
-            Read it first before writing to it."""))
+    # Enforce Read-before-Write (and freshness)
+    gate_error = _freshness_error(ctx.file_state, file_path)
+    if gate_error:
+        return ToolFailure(error_message=gate_error)
 
     try:
         old_content = file_path.read_text(encoding="utf-8")
@@ -266,7 +283,7 @@ async def _multiedit_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> Too
     # 4. Sequential Application
     new_content = old_content
     for edit in edits:
-        err = one_edit_check(file_path, new_content, edit)
+        err = one_edit_check(file_path, new_content, edit, ctx.file_state)
         if err:
             return ToolFailure(error_message=err)
         # Note: if replace_all is False, one_edit_check enforces count == 1, 
@@ -279,9 +296,8 @@ async def _multiedit_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> Too
     except Exception as e:
         return ToolFailure(error_message=f"Error writing to file: {str(e)}")
 
-    # 6. Update State Trackers
-    known_content_files[file_path] = new_content.splitlines() if len(new_content) < MAX_FILE_BYTES else None
-    stale_content_files.discard(file_path)
+    # 6. Record the new on-disk state so our own edits never appear stale
+    ctx.file_state.record(file_path, new_content.splitlines() if len(new_content) < MAX_FILE_BYTES else None)
 
     # 7. Format Response
     edit_plural = "s" if len(edits) > 1 else ""

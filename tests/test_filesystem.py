@@ -22,16 +22,14 @@ class TestFilesystemTools(unittest.IsolatedAsyncioTestCase):
         self.test_dir = tempfile.TemporaryDirectory()
         self.base_path = Path(self.test_dir.name)
 
+        # Each context carries its own fresh FileStateTracker, so state is
+        # automatically isolated between tests (no globals to reset).
         self.ctx = InvocationContext(
             workspace=self.base_path,
             cwd=self.base_path,
             workspace_is_git_repo=False,
             resume_file=None
         )
-        
-        # VERY IMPORTANT: Reset the global state trackers before every test
-        fs.known_content_files.clear()
-        fs.stale_content_files.clear()
 
     def tearDown(self):
         self.test_dir.cleanup()
@@ -70,7 +68,7 @@ class TestFilesystemTools(unittest.IsolatedAsyncioTestCase):
         self.assertIn("    3→line 3", result)
         
         # Verify it was added to the state tracker!
-        self.assertIn(file_path.resolve(), fs.known_content_files)
+        self.assertIn(file_path.resolve(), self.ctx.file_state.known)
 
     async def test_read_offset_out_of_bounds(self):
         file_path = self.base_path / "short.txt"
@@ -139,7 +137,7 @@ class TestFilesystemTools(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(file_path.read_text(), "brand new")
         
         # Verify state tracker updated
-        self.assertIn(file_path.resolve(), fs.known_content_files)
+        self.assertIn(file_path.resolve(), self.ctx.file_state.known)
 
 
     # ---------------------------------------------------------
@@ -403,8 +401,8 @@ class TestFilesystemTools(unittest.IsolatedAsyncioTestCase):
         self.assertIn('1. Replaced "quick" with "slow"', result)
         self.assertIn('3. Replaced "lazy" with "sleepy"', result)
         
-        # Verify state tracker updated
-        self.assertEqual(fs.known_content_files[file_path], expected_content.splitlines())
+        # Verify state tracker updated (tracker keys are resolved paths)
+        self.assertEqual(self.ctx.file_state.known[file_path.resolve()].lines, expected_content.splitlines())
 
     async def test_multiedit_success_with_replace_all(self):
         file_path = self.base_path / "replace_all.txt"

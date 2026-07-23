@@ -22,6 +22,7 @@ from adapter import acompletion
 from dotenv import load_dotenv
 from transcript import Transcript
 from hooks import HookManager, initial_setup_hook, agent_mode_hook
+from filestate import file_changes_hook
 from tools.registry import ToolRegistry
 from tools.core import create_core_registry
 
@@ -87,12 +88,11 @@ async def handle_shell(callback: ShellCallback) -> tuple[str, bool]:
 
 async def handle_subagent(
     callback: AgentCallback,
-    parent_registry: ToolRegistry,
-    hooks: HookManager,
+    ctx: InvocationContext,
     parent_transcript_path: Path,
     model: str
 ) -> tuple[list[TextMessageContent], bool]:
-    """Spins up a recursive sub-agent loop."""
+    """Spins up a recursive sub-agent loop with isolated file-state, registry, and hooks."""
     print(f"  >> [Sub-Agent '{callback.subagent_type}' started] Task: {callback.callback_description}")
     
     parent_dir = parent_transcript_path.parent
@@ -101,12 +101,33 @@ async def handle_subagent(
     
     sub_transcript = Transcript(sub_transcript_path)
     print(f"  >> [Sub-Agent log: {sub_transcript_path}]")
-    
-    # 1. Inject the Sub-Agent's specific System Prompt
+
+    # 1. Isolated context: a fresh, empty file-state tracker. The sub-agent
+    # must Read files itself before writing them; it never inherits the
+    # parent's read history (and vice versa).
+    sub_ctx = ctx.clone_for_subagent()
+
+    # 2. Isolated registry whose tool closures are bound to the sub-agent's context
+    sub_registry = create_core_registry(sub_ctx)
+    if callback.tools is not None:
+        sub_registry = sub_registry.clone_filtered(callback.tools)
+
+    # 3. Isolated hooks: AGENTS.md setup + file-change reminders bound to sub_ctx.
+    # Deliberately NOT the parent's HookManager: sub-agents always run in BUILD
+    # mode (no mode hook), and sharing the parent's hooks would leak pending
+    # parent notifications (mode changes, file diffs) into this transcript.
+    sub_hooks = HookManager()
+    app_config = load_app_config()
+    sub_hooks.register_user_prompt(
+        partial(initial_setup_hook, app_config=app_config, root=sub_ctx.workspace, cwd=sub_ctx.cwd)
+    )
+    sub_hooks.register_user_prompt(partial(file_changes_hook, ctx=sub_ctx))
+
+    # 4. Inject the Sub-Agent's specific System Prompt
     sub_transcript.append(SystemMessage(content=callback.system_content))
     
-    # 2. Fire the user hooks (This automatically injects AGENTS.md via initial_setup_hook!)
-    event = await hooks.trigger_user_prompt(callback.user_content, is_first_prompt=True)
+    # 5. Fire the user hooks (This automatically injects AGENTS.md via initial_setup_hook!)
+    event = await sub_hooks.trigger_user_prompt(callback.user_content, is_first_prompt=True)
     
     # Handle hook blocks (e.g. if a future hook denies the sub-agent prompt)
     if event.block:
@@ -120,19 +141,16 @@ async def handle_subagent(
         *event.context_post
     ]
     
-    # 3. Inject the Task instructions as the first User Message
+    # 6. Inject the Task instructions as the first User Message
     sub_transcript.append(UserMessage(content=message_content))
-    
-    # 4. Filter tools if the profile restricts them
-    sub_registry = parent_registry
-    if callback.tools is not None:
-        sub_registry = parent_registry.clone_filtered(callback.tools)
 
     # Create an isolated policy for the sub-agent and pass it
     sub_policy = AgentPolicy(mode=AgentMode.BUILD)
 
     # --- Capture the pristine list of blocks ---
-    final_blocks = await run_agentic_loop(sub_transcript, sub_registry, hooks, model=model, policy=sub_policy)
+    final_blocks = await run_agentic_loop(
+        sub_transcript, sub_registry, sub_hooks, model=model, policy=sub_policy, ctx=sub_ctx
+    )
     
     print(f"  >> [Sub-Agent '{callback.subagent_type}' finished]")
     return final_blocks, False
@@ -144,7 +162,8 @@ async def execute_tool(
     hooks: HookManager, 
     transcript_path: Path,
     model: str,
-    policy: AgentPolicy=None
+    policy: AgentPolicy | None = None,
+    ctx: InvocationContext | None = None
 ) -> list[TextMessageContent | ToolResultMessageContent]:
     """
     Invokes a tool, handles pre/post hooks, and catches execution exceptions.
@@ -170,7 +189,7 @@ async def execute_tool(
         if isinstance(raw_result, ShellCallback):
             result_output, is_error = await handle_shell(raw_result)
         elif isinstance(raw_result, AgentCallback):
-            result_output, is_error = await handle_subagent(raw_result, registry, hooks, transcript_path, model=model)
+            result_output, is_error = await handle_subagent(raw_result, ctx, transcript_path, model=model)
         elif isinstance(raw_result, PlanApprovalCallback):
             print("\n" + "="*40)
             print(" AI PROPOSED PLAN:")
@@ -236,7 +255,8 @@ async def run_agentic_loop(
     base_registry: ToolRegistry,
     hooks: HookManager,
     model: str,
-    policy: AgentPolicy
+    policy: AgentPolicy,
+    ctx: InvocationContext
 ) -> list[TextMessageContent]:
     """
     Returns the pristine list of text blocks from the LLM when no more tools are requested.
@@ -262,8 +282,8 @@ async def run_agentic_loop(
         # Execute all tools requested by the LLM
         tool_results_content = []
         for tu in tool_uses:
-            # Pass current_registry and policy down
-            result_blocks = await execute_tool(tu, current_registry, hooks, transcript.file_path, model=model, policy=policy)
+            # Pass current_registry, policy and ctx down
+            result_blocks = await execute_tool(tu, current_registry, hooks, transcript.file_path, model=model, policy=policy, ctx=ctx)
             tool_results_content.extend(result_blocks)
 
         transcript.append(UserMessage(content=tool_results_content))
@@ -358,12 +378,14 @@ async def main():
     policy = AgentPolicy()
     policy.mode = AgentMode.BUILD
     
-    # Bind and register both hooks
+    # Bind and register the built-in hooks
     bound_setup_hook = partial(initial_setup_hook, app_config=app_config, root=root_dir, cwd=cwd)
     bound_mode_hook = partial(agent_mode_hook, policy=policy)
+    bound_file_changes_hook = partial(file_changes_hook, ctx=ctx)
 
     hooks.register_user_prompt(bound_setup_hook)
     hooks.register_user_prompt(bound_mode_hook)
+    hooks.register_user_prompt(bound_file_changes_hook)
     
     # Load (or create) the main transcript
     transcript = Transcript(transcript_file)
@@ -417,7 +439,7 @@ async def main():
             ]
             
             transcript.append(UserMessage(content=message_content))
-            await run_agentic_loop(transcript, registry, hooks, model=args.model, policy=policy)
+            await run_agentic_loop(transcript, registry, hooks, model=args.model, policy=policy, ctx=ctx)
             
         except (KeyboardInterrupt, EOFError):
             print("\nExiting...")
