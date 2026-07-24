@@ -6,9 +6,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 # Adjust import paths depending on your exact project structure
+import types
 import tools.filesearch as fs
 from tools.filesearch import _ls_impl
 from typedefs import ToolFailure
+from helpers import unwrapped
+
+# Tests assert on the raw LLM-facing content; unwrap the ToolResult envelope.
+_ls_impl = unwrapped(_ls_impl)
+fs = types.SimpleNamespace(_ls_impl=_ls_impl)
 from sessioncontext import InvocationContext
 
 # chatgpt

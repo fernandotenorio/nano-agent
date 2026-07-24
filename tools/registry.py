@@ -1,9 +1,9 @@
 from __future__ import annotations
 import pydantic
 from typing import Any, Callable, Awaitable, Union
-from typedefs import ShellCallback, AgentCallback, PlanApprovalCallback, TextMessageContent, ToolFailure
+from typedefs import ShellCallback, AgentCallback, PlanApprovalCallback, TextMessageContent, ToolFailure, ToolResult
 
-ToolReturnType = Union[str, list[TextMessageContent], ShellCallback, AgentCallback, PlanApprovalCallback, ToolFailure]
+ToolReturnType = Union[str, list[TextMessageContent], ShellCallback, AgentCallback, PlanApprovalCallback, ToolFailure, ToolResult]
 ToolCallable = Callable[[dict[str, Any]], Awaitable[ToolReturnType]]
 
 class ToolRegistry:

@@ -10,6 +10,10 @@ from sessioncontext import InvocationContext
 import tools.filesearch as fs
 from tools.filesearch import _glob_impl
 from typedefs import ToolFailure
+from helpers import unwrapped
+
+# Tests assert on the raw LLM-facing content; unwrap the ToolResult envelope.
+_glob_impl = unwrapped(_glob_impl)
 
 
 class TestGlobTool(unittest.IsolatedAsyncioTestCase):
@@ -179,6 +183,7 @@ class TestGlobTool(unittest.IsolatedAsyncioTestCase):
         even when the search base is a subdirectory (the old base-relative
         output silently resolved against the wrong directory)."""
         from tools.filesystem import _read_impl
+        _read_impl = unwrapped(_read_impl)
 
         file_path = self.base_path / "sub" / "notes.txt"
         file_path.parent.mkdir(parents=True)

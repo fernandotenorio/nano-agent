@@ -1,6 +1,6 @@
 ﻿import asyncio
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from pathlib import Path
 import sys
 import uuid
@@ -15,6 +15,14 @@ from hooks import PreToolUseEvent, PostToolUseEvent, UserPromptEvent
 from agent import run_agentic_loop
 from agent import execute_tool, handle_shell, handle_subagent, main
 from sessioncontext import AgentPolicy, AgentMode, InvocationContext
+from ui.null_ui import NullUI
+
+
+class StubREPLUI(NullUI):
+    """Silent UI whose REPL prompt still reads from the builtin input(),
+    so the existing @patch('builtins.input') plumbing keeps driving main()."""
+    def read_user_input(self) -> str:
+        return input()
 
 
 class TestAgenticLoopGroup1(unittest.IsolatedAsyncioTestCase):
@@ -120,7 +128,7 @@ class TestAgenticLoopGroup1(unittest.IsolatedAsyncioTestCase):
         
         # Tool executed exactly once with correct parameters
         mock_execute_tool.assert_called_once_with(
-            tool_use, self.registry, self.hooks, self.transcript.file_path, model=self.model, policy=self.policy, ctx=self.ctx
+            tool_use, self.registry, self.hooks, self.transcript.file_path, model=self.model, policy=self.policy, ctx=self.ctx, ui=ANY
         )
         
         # Transcript should have 3 appends: msg1, UserMessage(ToolResult), msg2
@@ -394,7 +402,7 @@ class TestHandleShellGroup3(unittest.IsolatedAsyncioTestCase):
         mock_create_shell.return_value = mock_process
         
         # Action
-        text, is_error = await handle_shell(self.callback, self.ctx)
+        text, is_error, _ui_summary = await handle_shell(self.callback, self.ctx)
         
         # Assertions
         self.assertFalse(is_error)
@@ -418,7 +426,7 @@ class TestHandleShellGroup3(unittest.IsolatedAsyncioTestCase):
         mock_create_shell.return_value = mock_process
         
         # Action
-        text, is_error = await handle_shell(self.callback, self.ctx)
+        text, is_error, _ui_summary = await handle_shell(self.callback, self.ctx)
         
         # Assertions
         self.assertTrue(is_error)
@@ -438,7 +446,7 @@ class TestHandleShellGroup3(unittest.IsolatedAsyncioTestCase):
         mock_create_shell.return_value = mock_process
         
         # Action
-        text, is_error = await handle_shell(self.callback, self.ctx)
+        text, is_error, _ui_summary = await handle_shell(self.callback, self.ctx)
         
         # Assertions
         self.assertFalse(is_error)
@@ -458,7 +466,7 @@ class TestHandleShellGroup3(unittest.IsolatedAsyncioTestCase):
         mock_create_shell.return_value = mock_process
         
         # Action
-        text, is_error = await handle_shell(self.callback, self.ctx)
+        text, is_error, _ui_summary = await handle_shell(self.callback, self.ctx)
         
         # Assertions
         self.assertTrue(is_error)
@@ -482,7 +490,7 @@ class TestHandleShellGroup3(unittest.IsolatedAsyncioTestCase):
         mock_create_shell.return_value = mock_process
         
         # Action
-        text, is_error = await handle_shell(self.callback, self.ctx)
+        text, is_error, _ui_summary = await handle_shell(self.callback, self.ctx)
         
         # Assertions
         self.assertFalse(is_error)
@@ -676,8 +684,15 @@ class TestMainLoopGroup5(unittest.IsolatedAsyncioTestCase):
         self.argv_patcher = patch.object(sys, "argv", ["agent.py"])
         self.argv_patcher.start()
 
+        # These tests exercise the REPL logic, not the rendering: swap the
+        # concrete RichUI for a silent stub that still reads input() so the
+        # builtins.input patches keep working.
+        self.ui_patcher = patch("ui.rich_ui.RichUI", StubREPLUI)
+        self.ui_patcher.start()
+
     def tearDown(self):
         self.argv_patcher.stop()
+        self.ui_patcher.stop()
 
     @patch("builtins.print")
     @patch("agent.run_agentic_loop", new_callable=AsyncMock)

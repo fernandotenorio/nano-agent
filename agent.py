@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+import time
 import argparse
 import uuid
 from functools import partial
@@ -15,8 +16,8 @@ from sessioncontext import InvocationContext, AgentPolicy, AgentMode
 from typing import Literal
 from typedefs import (
     TextMessageContent, ToolResultMessageContent, ToolUseMessageContent,
-    ToolFailure, UserMessage, SystemMessage, ShellCallback, AgentCallback,
-    PlanApprovalCallback
+    ToolFailure, ToolResult, UserMessage, SystemMessage, ShellCallback,
+    AgentCallback, PlanApprovalCallback
 )
 from adapter import acompletion
 from dotenv import load_dotenv
@@ -25,18 +26,21 @@ from hooks import HookManager, initial_setup_hook, agent_mode_hook, shell_confir
 from filestate import file_changes_hook
 from tools.registry import ToolRegistry
 from tools.core import create_core_registry
+from ui.base import UI, SessionInfo
+from ui.null_ui import NullUI
+from ui.summaries import summarize_call
 
 
 load_dotenv(".env.development")
 logging.basicConfig(level=logging.WARNING)
 
-async def handle_shell(callback: ShellCallback, ctx: InvocationContext) -> tuple[str, bool]:
+async def handle_shell(callback: ShellCallback, ctx: InvocationContext) -> tuple[str, bool, str]:
     """
     Executes a shell command natively with timeouts and streaming partial output.
-    Returns (output_text, is_error).
+    Returns (output_text, is_error, ui_summary).
     """
     MAX_OUTPUT = 30000
-    print(f"  $ {callback.command}")
+    started_at = time.monotonic()
     
     # Pin the working directory to the agent's cwd (always inside the workspace).
     process = await asyncio.create_subprocess_shell(
@@ -77,36 +81,43 @@ async def handle_shell(callback: ShellCallback, ctx: InvocationContext) -> tuple
         exit_code = "timeout"
     
     stdout, stderr = await asyncio.gather(stdout_task, stderr_task)
+    elapsed = time.monotonic() - started_at
     
     # Format the result just like mini_agent
     if exit_code == "timeout":
         is_error = True
         text = f"Command timed out after {callback.timeout:0.1f}s\n{stderr}\n{stdout}"
+        ui_summary = f"Shell command timed out after {callback.timeout:0.1f}s"
     elif exit_code == 0:
         is_error = False
         text = f"{stdout}\n{stderr}"
+        ui_summary = f"Shell exited with code 0 ({elapsed:.1f}s)"
     else:
         is_error = True
         text = f"{stderr}\n{stdout}"
+        ui_summary = f"Shell exited with code {exit_code} ({elapsed:.1f}s)"
         
-    return text.strip() or "Command completed with no output.", is_error
+    return text.strip() or "Command completed with no output.", is_error, ui_summary
 
 
 async def handle_subagent(
     callback: AgentCallback,
     ctx: InvocationContext,
     parent_transcript_path: Path,
-    model: str
+    model: str,
+    ui: UI = NullUI()
 ) -> tuple[list[TextMessageContent], bool]:
     """Spins up a recursive sub-agent loop with isolated file-state, registry, and hooks."""
-    print(f"  >> [Sub-Agent '{callback.subagent_type}' started] Task: {callback.callback_description}")
-    
     parent_dir = parent_transcript_path.parent
     sub_id = uuid.uuid4().hex[:6]
     sub_transcript_path = parent_dir / f"{parent_transcript_path.stem}_{callback.subagent_type}_{sub_id}.jsonl"
     
     sub_transcript = Transcript(sub_transcript_path)
-    print(f"  >> [Sub-Agent log: {sub_transcript_path}]")
+
+    # Sub-agent internals are hidden behind a single spinner: the quiet UI
+    # suppresses nested rendering but still routes safety prompts (shell
+    # confirmation) back to the real UI.
+    sub_ui = ui.for_subagent()
 
     # 1. Isolated context: a fresh, empty file-state tracker. The sub-agent
     # must Read files itself before writing them; it never inherits the
@@ -132,7 +143,7 @@ async def handle_subagent(
     sub_hooks.register_user_prompt(partial(file_changes_hook, ctx=sub_ctx))
 
     # Sub-agents must not bypass the Shell confirmation gate
-    sub_hooks.register_pre_tool(shell_confirmation_hook)
+    sub_hooks.register_pre_tool(partial(shell_confirmation_hook, ui=sub_ui))
 
     # 4. Inject the Sub-Agent's specific System Prompt
     sub_transcript.append(SystemMessage(content=callback.system_content))
@@ -142,7 +153,6 @@ async def handle_subagent(
     
     # Handle hook blocks (e.g. if a future hook denies the sub-agent prompt)
     if event.block:
-        print(f"  >> [Sub-Agent BLOCKED]: {event.block_reason}")
         return [TextMessageContent(text=f"Sub-agent blocked before starting: {event.block_reason}")], True
 
     # Assemble the payload just like the main loop
@@ -159,11 +169,10 @@ async def handle_subagent(
     sub_policy = AgentPolicy(mode=AgentMode.BUILD)
 
     # --- Capture the pristine list of blocks ---
-    final_blocks = await run_agentic_loop(
-        sub_transcript, sub_registry, sub_hooks, model=model, policy=sub_policy, ctx=sub_ctx
-    )
-    
-    print(f"  >> [Sub-Agent '{callback.subagent_type}' finished]")
+    with ui.tool_status(f"Running sub-agent '{callback.subagent_type}' ({callback.callback_description})"):
+        final_blocks = await run_agentic_loop(
+            sub_transcript, sub_registry, sub_hooks, model=model, policy=sub_policy, ctx=sub_ctx, ui=sub_ui
+        )
 
     # A sub-agent that stops without producing any final text gives the parent
     # nothing to act on; report that as an error rather than a silent success.
@@ -175,6 +184,13 @@ async def handle_subagent(
     return final_blocks, False
 
 
+def _error_headline(output: str | list[TextMessageContent], max_len: int = 100) -> str:
+    """Extracts a compact first line from an error payload for UI summaries."""
+    text = output if isinstance(output, str) else " ".join(b.text for b in output)
+    first_line = text.strip().splitlines()[0] if text.strip() else "unknown error"
+    return first_line if len(first_line) <= max_len else first_line[:max_len - 3] + "..."
+
+
 async def execute_tool(
     tu: ToolUseMessageContent, 
     registry: ToolRegistry, 
@@ -182,18 +198,19 @@ async def execute_tool(
     transcript_path: Path,
     model: str,
     policy: AgentPolicy,
-    ctx: InvocationContext
+    ctx: InvocationContext,
+    ui: UI = NullUI()
 ) -> list[TextMessageContent | ToolResultMessageContent]:
     """
     Invokes a tool, handles pre/post hooks, and catches execution exceptions.
     Modeled after mini_agent's invoke_tool.
     """
-    print(f"  >> Calling {tu.name}(...)")
+    call_summary = summarize_call(tu.name, tu.input)
     
     # 1. Pre-Hook
     pre_event = await hooks.trigger_pre_tool(tu.name, tu.input)
     if pre_event.decision == "deny":
-        print(f"  >> [BLOCKED by Hook]: {pre_event.deny_reason}")
+        ui.tool_result(f"{call_summary} - blocked: {pre_event.deny_reason}", is_error=True)
         return [ToolResultMessageContent(
             tool_use_id=tu.id,
             content=f"Tool blocked: {pre_event.deny_reason}",
@@ -201,45 +218,50 @@ async def execute_tool(
         )]
 
     # 2. Invoke Tool with Error Boundaries
+    ui_summary: str | None = None
     try:
-        raw_result = await registry.invoke(tu.name, tu.input)
+        with ui.tool_status(call_summary):
+            raw_result = await registry.invoke(tu.name, tu.input)
         
         # Route Native Callbacks
         if isinstance(raw_result, ShellCallback):
-            result_output, is_error = await handle_shell(raw_result, ctx)
+            with ui.tool_status(call_summary):
+                result_output, is_error, ui_summary = await handle_shell(raw_result, ctx)
         elif isinstance(raw_result, AgentCallback):
-            result_output, is_error = await handle_subagent(raw_result, ctx, transcript_path, model=model)
+            result_output, is_error = await handle_subagent(raw_result, ctx, transcript_path, model=model, ui=ui)
+            ui_summary = (
+                f"Sub-agent '{raw_result.subagent_type}' failed" if is_error
+                else f"Sub-agent '{raw_result.subagent_type}' completed"
+            )
         elif isinstance(raw_result, PlanApprovalCallback):
-            print("\n" + "="*40)
-            print(" AI PROPOSED PLAN:")
-            print("=" * 40)
-            print(raw_result.plan_summary)
-            print("=" * 40)
-            print("1. Accept plan and switch to BUILD mode")
-            print("2. Accept plan but keep in PLAN mode (to refine further)")
-            print("3. Reject plan with message")
+            decision = ui.approve_plan(raw_result.plan_summary)
             
-            # Note: For simple CLI, synchronous input() here is fine
-            choice = input("\nSelect an option (1/2/3): ").strip()
-            
-            if choice == "1":
+            if decision.choice == "build":
                 policy.mode = AgentMode.BUILD
                 policy.notified_mode = AgentMode.BUILD # Prevent the hook from double-firing
                 result_output = "SUCCESS: User accepted the plan and switched to BUILD mode. You now have access to write tools. Proceed with execution."
                 is_error = False
+                ui_summary = "Plan accepted - switched to BUILD mode"
 
-            elif choice == "2":
+            elif decision.choice == "plan":
                 result_output = "User accepted the plan, but chose to remain in PLAN mode. Await further user instructions."
                 is_error = False
+                ui_summary = "Plan accepted - staying in PLAN mode"
 
             else:
-                reason = input("Enter rejection reason: ").strip()
-                result_output = f"REJECTED: User rejected the plan. Reason: {reason}"
+                result_output = f"REJECTED: User rejected the plan. Reason: {decision.reject_reason}"
                 is_error = True
+                ui_summary = "Plan rejected"
         elif isinstance(raw_result, ToolFailure):
             # EXPLICIT FAILURE
             result_output = raw_result.error_message
             is_error = True
+            ui_summary = raw_result.ui_summary
+        elif isinstance(raw_result, ToolResult):
+            # Standard tool output with a human-facing summary attached
+            result_output = raw_result.content
+            is_error = False
+            ui_summary = raw_result.ui_summary
         else:
             # Standard tool output
             result_output = raw_result
@@ -248,6 +270,11 @@ async def execute_tool(
         # Catch Python exceptions (FileNotFound, JSON decoding, missing keys, etc.)
         result_output = f"Error during tool execution: {str(e)}"
         is_error = True
+
+    if is_error:
+        ui.tool_result(ui_summary or f"{call_summary} - {_error_headline(result_output)}", is_error=True)
+    else:
+        ui.tool_result(ui_summary or call_summary, is_error=False)
 
     # 3. Format Base Result
     content: list[TextMessageContent | ToolResultMessageContent] = [
@@ -279,7 +306,8 @@ async def run_agentic_loop(
     hooks: HookManager,
     model: str,
     policy: AgentPolicy,
-    ctx: InvocationContext
+    ctx: InvocationContext,
+    ui: UI = NullUI()
 ) -> list[TextMessageContent]:
     """
     Returns the pristine list of text blocks from the LLM when no more tools are requested.
@@ -289,14 +317,22 @@ async def run_agentic_loop(
         current_registry = base_registry.clone_readonly() if policy.mode == AgentMode.PLAN else base_registry
         schemas = current_registry.get_all_schemas()
 
-        response = await acompletion(model, schemas, transcript.messages)
+        llm_started_at = time.monotonic()
+        with ui.tool_status(f"Waiting for {model}"):
+            response = await acompletion(model, schemas, transcript.messages)
+        llm_duration = time.monotonic() - llm_started_at
         transcript.append(response)
 
         texts = [c for c in response.content if getattr(c, "type", None) == "text"]
         tool_uses = [c for c in response.content if getattr(c, "type", None) == "tool_use"]
+        thinkings = [c for c in response.content if getattr(c, "type", None) == "thinking"]
+
+        # Reasoning blocks are collapsed into a single subtle line
+        if thinkings:
+            ui.thinking("\n\n".join(t.thinking for t in thinkings), duration_s=llm_duration)
 
         for text_block in texts:
-            print(f"< {text_block.text}")
+            ui.assistant_text(text_block.text)
 
         # If LLM doesn't want to use any more tools, break the loop and return texts
         if not tool_uses:
@@ -306,22 +342,22 @@ async def run_agentic_loop(
         tool_results_content = []
         for tu in tool_uses:
             # Pass current_registry, policy and ctx down
-            result_blocks = await execute_tool(tu, current_registry, hooks, transcript.file_path, model=model, policy=policy, ctx=ctx)
+            result_blocks = await execute_tool(tu, current_registry, hooks, transcript.file_path, model=model, policy=policy, ctx=ctx, ui=ui)
             tool_results_content.extend(result_blocks)
 
         transcript.append(UserMessage(content=tool_results_content))
 
     # Turn ceiling reached: stop the loop instead of running away.
     warning = f"Stopped after reaching the maximum of {MAX_AGENT_TURNS} tool-calling turns for a single prompt."
-    print(f"[{warning}]")
+    ui.notice(warning)
     return [TextMessageContent(text=warning)]
 
-def get_transcript_path(app_config: AppConfig, cwd: Path, resume_arg: str | None) -> Path:
+def get_transcript_path(app_config: AppConfig, cwd: Path, resume_arg: str | None, ui: UI = NullUI()) -> Path:
     """Determines where to load/save the transcript file."""
     if resume_arg:
         path = Path(resume_arg).expanduser().resolve()
         if not path.exists():
-            print(f"Warning: Provided resume path '{path}' does not exist. It will be created.")
+            ui.notice(f"Warning: Provided resume path '{path}' does not exist. It will be created.")
         return path
     
     # Default behavior: create a hidden `.agent/transcripts/` folder in the current directory
@@ -329,6 +365,18 @@ def get_transcript_path(app_config: AppConfig, cwd: Path, resume_arg: str | None
     default_dir = app_config.project_transcripts_dir(cwd)
     default_dir.mkdir(parents=True, exist_ok=True)
     return default_dir / f"{timestamp}.jsonl"
+
+
+def read_git_branch(root: Path) -> str | None:
+    """Reads the current branch name (or short detached hash) from .git/HEAD."""
+    head_file = root / ".git" / "HEAD"
+    try:
+        content = head_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if content.startswith("ref: "):
+        return content.removeprefix("ref: ").rsplit("/", 1)[-1]
+    return content[:8] or None
 
 
 async def main():
@@ -374,21 +422,21 @@ async def main():
 
     args = parser.parse_args()
 
+    # The single concrete UI for this session. Imported lazily so that every
+    # other module (and the test suite) never pulls in `rich` transitively.
+    from ui.rich_ui import RichUI
+    ui: UI = RichUI()
+
     # Workspace root directory resolution and validation
     root_dir = Path(args.workspace_root).expanduser().resolve() if args.workspace_root else cwd
 
     # Exit with error if cwd it no within workspace dir
     if not cwd.is_relative_to(root_dir):
-        print(f"Error: Current directory ({cwd}) is not within the specified --workspace-root ({root_dir}).")
+        ui.error(f"Current directory ({cwd}) is not within the specified --workspace-root ({root_dir}).")
         sys.exit(1)
 
     # Creates transcripts folder if it does not exists
-    transcript_file = get_transcript_path(app_config, cwd, args.resume)
-    print(f"[TRANSCRIPT: {transcript_file}]")
-    print(f"[MODEL: {args.model}]")
-
-    if root_dir != cwd:
-        print(f"[ROOT: {root_dir}]")
+    transcript_file = get_transcript_path(app_config, cwd, args.resume, ui=ui)
 
     # 1. Create the context
     ctx = InvocationContext(
@@ -416,7 +464,7 @@ async def main():
     hooks.register_user_prompt(bound_file_changes_hook)
 
     # Safety gate: every Shell command requires explicit user confirmation
-    hooks.register_pre_tool(shell_confirmation_hook)
+    hooks.register_pre_tool(partial(shell_confirmation_hook, ui=ui))
     
     # Load (or create) the main transcript
     transcript = Transcript(transcript_file)
@@ -425,11 +473,19 @@ async def main():
     if len(transcript.messages) == 0:
         transcript.append(build_system_prompt(app_config, cwd, ctx, args))
     
-    print(f"Welcome to {app_config.app_name.capitalize()} Code Agent (Type '/quit' to exit, '/plan' or '/build' to switch modes)")
+    ui.session_start(SessionInfo(
+        app_name=app_config.app_name.capitalize(),
+        model=args.model,
+        mode=policy.mode.name,
+        workspace=root_dir,
+        cwd=cwd,
+        transcript_path=transcript_file,
+        git_branch=read_git_branch(root_dir) if ctx.workspace_is_git_repo else None,
+    ))
     
     while True:
         try:
-            user_input = input("\n> ")
+            user_input = ui.read_user_input()
             if user_input.strip().lower() in ["/quit", "/exit"]:
                 break
 
@@ -438,14 +494,14 @@ async def main():
 
             if user_input_lower.startswith("/plan"):
                 policy.mode = AgentMode.PLAN
-                print("[Switched to PLAN Mode]")                
+                ui.mode_changed("PLAN")
                 user_input = user_input[len("/plan"):].strip()
 
                 if not user_input:
                     continue
             elif user_input_lower.startswith("/build"):
                 policy.mode = AgentMode.BUILD
-                print("[Switched to BUILD Mode]")
+                ui.mode_changed("BUILD")
                 user_input = user_input[len("/build"):].strip()
 
                 if not user_input:
@@ -459,7 +515,7 @@ async def main():
             event = await hooks.trigger_user_prompt(user_input, is_first_prompt)
             
             if event.block:
-                print(f"[BLOCKED]: {event.block_reason}")
+                ui.error(f"Blocked: {event.block_reason}")
                 continue
 
             # 3. Assemble the payload: [ PRE, PROMPT, POST ]
@@ -470,18 +526,18 @@ async def main():
             ]
             
             transcript.append(UserMessage(content=message_content))
-            await run_agentic_loop(transcript, registry, hooks, model=args.model, policy=policy, ctx=ctx)
+            await run_agentic_loop(transcript, registry, hooks, model=args.model, policy=policy, ctx=ctx, ui=ui)
             
         except (KeyboardInterrupt, EOFError):
-            print("\nExiting...")
+            ui.notice("Exiting...")
             break
         except Exception as e:
             # An API hiccup (rate limit, network blip) or a bug in a hook must
             # not kill the session: the transcript persists incrementally, so
             # the conversation can simply continue on the next prompt.
             logging.exception("Error during agent turn")
-            print(f"\n[ERROR] {type(e).__name__}: {e}")
-            print("The session is still alive. You can try again or type '/quit' to exit.")
+            ui.error(f"{type(e).__name__}: {e}")
+            ui.notice("The session is still alive. You can try again or type '/quit' to exit.")
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -31,6 +31,13 @@ class ToolResultMessageContent(pydantic.BaseModel):
 class ToolFailure(pydantic.BaseModel):
     """Returned by a tool to explicitly signal an error state to the agent loop."""
     error_message: str
+    ui_summary: str | None = None
+
+class ToolResult(pydantic.BaseModel):
+    """Wraps a tool's raw payload for the LLM together with a short, human-friendly
+    summary for the terminal UI (e.g. 'Read src/agent.py (487 lines)')."""
+    content: str | list[TextMessageContent]
+    ui_summary: str | None = None
 
 # ---------------------------------------------------------
 # Messages

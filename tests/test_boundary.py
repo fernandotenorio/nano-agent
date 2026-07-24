@@ -8,6 +8,15 @@ from tools.paths import resolve_in_workspace
 from tools.filesystem import _read_impl, _write_impl, _edit_impl, _multiedit_impl
 from tools.filesearch import _glob_impl, _ls_impl
 from typedefs import ToolFailure
+from helpers import unwrapped
+
+# Tests assert on the raw LLM-facing content; unwrap the ToolResult envelope.
+_read_impl = unwrapped(_read_impl)
+_write_impl = unwrapped(_write_impl)
+_edit_impl = unwrapped(_edit_impl)
+_multiedit_impl = unwrapped(_multiedit_impl)
+_glob_impl = unwrapped(_glob_impl)
+_ls_impl = unwrapped(_ls_impl)
 
 
 def _supports_symlinks(base: Path) -> bool:

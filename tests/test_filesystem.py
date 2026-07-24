@@ -8,6 +8,13 @@ from sessioncontext import InvocationContext
 import tools.filesystem as fs
 from tools.filesystem import _read_impl, _write_impl, _edit_impl, _multiedit_impl
 from typedefs import ToolFailure
+from helpers import unwrapped
+
+# Tests assert on the raw LLM-facing content; unwrap the ToolResult envelope.
+_read_impl = unwrapped(_read_impl)
+_write_impl = unwrapped(_write_impl)
+_edit_impl = unwrapped(_edit_impl)
+_multiedit_impl = unwrapped(_multiedit_impl)
 
 
 class TestFilesystemTools(unittest.IsolatedAsyncioTestCase):

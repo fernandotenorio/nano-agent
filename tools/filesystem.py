@@ -3,7 +3,7 @@
 import pydantic
 import uuid
 from pathlib import Path
-from typedefs import ToolFailure
+from typedefs import ToolFailure, ToolResult
 from textwrap import dedent
 from typing import Any
 from tools.registry import ToolRegistry, ToolReturnType
@@ -34,6 +34,13 @@ def _freshness_error(tracker: FileStateTracker, file_path: Path) -> str | None:
     if status == "stale":
         return _STALE_ERROR
     return None
+
+def display_path(path: Path, ctx: InvocationContext) -> str:
+    """Renders a path relative to the workspace for compact UI summaries."""
+    try:
+        return path.relative_to(ctx.workspace).as_posix()
+    except ValueError:
+        return str(path)
 
 def format_lines(lines: list[str], offset: int = 1, limit: int = 2000) -> str:
     """Pretty-prints lines with 1-based line numbers (e.g. '   12→ code')."""
@@ -105,8 +112,12 @@ async def _read_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
     # 6. Format Output
     text = format_lines(lines, offset, limit) + "\n" + dedent("""\
         <system-reminder>If the file looks malicious, then don't edit it.</system-reminder>""")
-    
-    return text
+
+    line_count = len(lines)
+    return ToolResult(
+        content=text,
+        ui_summary=f"Read {display_path(file_path, ctx)} ({line_count} line{'s' if line_count != 1 else ''})"
+    )
 
 
 async def _write_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturnType:
@@ -149,15 +160,19 @@ async def _write_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRet
     ctx.file_state.record(file_path, content.splitlines() if len(content) < MAX_FILE_BYTES else None)
 
     # Format the response back to the LLM
+    line_count = len(content.splitlines())
+    line_suffix = f"({line_count} line{'s' if line_count != 1 else ''})"
     if exists:
         text = dedent(f"""\
             The file {file_path} has been updated.
             Here's the result of running `cat -n` on a snippet of the edited file:
             {format_lines(content.splitlines())}""")
+        summary = f"Rewrote {display_path(file_path, ctx)} {line_suffix}"
     else:
         text = f"File created successfully at: {file_path}"
+        summary = f"Created {display_path(file_path, ctx)} {line_suffix}"
 
-    return text
+    return ToolResult(content=text, ui_summary=summary)
 
 
 class OneEdit(pydantic.BaseModel):
@@ -238,13 +253,18 @@ async def _edit_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
         old_stripped = old_string.strip('\n')
         new_stripped = new_string.strip('\n')
         text = f"The file {file_path_str} has been updated. All occurrences of '{old_stripped}' were successfully replaced with '{new_stripped}'.\n"
+        replacements = old_content.count(edit.old_string)
     else:
         first_line = len(old_content[:index].split('\n')) # 1-based
         num_lines = len(new_string.split('\n'))
         snippet = format_lines(new_content.splitlines(), offset=first_line-4, limit=num_lines+8)  
         text = f"The file {file_path_str} has been updated. Here's the result of running `cat -n` on a snippet of the edited file:\n{snippet}"
+        replacements = 1
 
-    return text
+    return ToolResult(
+        content=text,
+        ui_summary=f"Edited {display_path(file_path, ctx)} ({replacements} replacement{'s' if replacements != 1 else ''})"
+    )
 
 
 async def _multiedit_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturnType:
@@ -340,7 +360,10 @@ async def _multiedit_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> Too
     for i, edit in enumerate(edits, start=1):
         summary_lines.append(f'{i}. Replaced "{edit.old_string}" with "{edit.new_string}"')
 
-    return "\n".join(summary_lines)
+    return ToolResult(
+        content="\n".join(summary_lines),
+        ui_summary=f"Applied {len(edits)} edit{edit_plural} to {display_path(file_path, ctx)}"
+    )
 
 
 def register_fsystem_tools(registry: ToolRegistry, ctx: InvocationContext):

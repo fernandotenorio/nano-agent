@@ -12,7 +12,7 @@ from typedefs import (
     TextMessageContent, ToolUseMessageContent, ToolResultMessageContent, ThinkingMessageContent
 )
 from adapter import (
-    format_tool_desc, to_openai_message, parse_assistant_response, acompletion, spinner
+    format_tool_desc, to_openai_message, parse_assistant_response, acompletion
 )
 
 
@@ -244,32 +244,8 @@ class TestAdapterLLM(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tools", called_kwargs)
         self.assertIn("user", called_kwargs) # OpenAI Prompt Cache Key
 
-
-    # ---------------------------------------------------------
-    # GROUP 5: Spinner UI
-    # ---------------------------------------------------------
-
-    @patch("sys.stdout.isatty", return_value=False)
-    @patch("sys.stdout.write")
-    async def test_spinner_no_tty(self, mock_write, mock_isatty):
-        async def dummy_task(): return "done"
-        
-        res = await spinner(dummy_task())
-        
-        self.assertEqual(res, "done")
-        mock_write.assert_not_called() # No prints in CI/CD mode
-
-    @patch("sys.stdout.isatty", return_value=True)
-    @patch("sys.stdout.write")
-    @patch("sys.stdout.flush")
-    async def test_spinner_tty(self, mock_flush, mock_write, mock_isatty):
-        async def fast_task(): return "done"
-        
-        res = await spinner(fast_task())
-        
-        self.assertEqual(res, "done")
-        mock_write.assert_called() # Spinner outputted correctly
-        mock_flush.assert_called()
+    # NOTE: The old adapter-level spinner was removed. Progress indication now
+    # lives in the UI layer (ui/rich_ui.py) and is exercised by the agent loop.
 
 
 if __name__ == "__main__":

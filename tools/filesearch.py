@@ -11,7 +11,7 @@ from tools.ignore import IgnoreMatcher
 from tools.paths import resolve_in_workspace
 from tools.registry import ToolRegistry, ToolReturnType
 from typing import Any, Iterator
-from typedefs import ToolFailure
+from typedefs import ToolFailure, ToolResult
 from sessioncontext import InvocationContext
 from wcmatch import glob
 
@@ -137,18 +137,23 @@ async def _glob_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
     await asyncio.to_thread(walk_iterative, base_path)
 
     if not heap:
-        return "No files found."
+        return ToolResult(content="No files found.", ui_summary="Found 0 files")
 
     results = sorted(heap, key=lambda x: (-x[0], x[1]))
     lines = [path for _, path in results]
 
-    if total_matches > MAX_GLOB_RESULTS:
+    truncated = total_matches > MAX_GLOB_RESULTS
+    if truncated:
         lines.append(
             f"(Results are truncated to {MAX_GLOB_RESULTS}. "
             "Consider using a more specific path, pattern, or exclude list.)"
         )
 
-    return "\n".join(lines)
+    summary = f"Found {total_matches} file{'s' if total_matches != 1 else ''}"
+    if truncated:
+        summary += f" (showing {MAX_GLOB_RESULTS})"
+
+    return ToolResult(content="\n".join(lines), ui_summary=summary)
 
 
 async def _ls_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturnType:
@@ -207,7 +212,7 @@ async def _ls_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturn
                 display = f"{target.name} -> [unreadable link]"
         else:
             display = target.name        
-        return f"{target}\n└── {display}"
+        return ToolResult(content=f"{target}\n└── {display}", ui_summary="Listed 1 entry")
 
     def get_dir_count(dir_path: Path) -> str:
         """Safely count non-ignored items in a directory using os.scandir."""
@@ -295,15 +300,18 @@ async def _ls_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturn
     
     if target_level == 0:
         lines.append("└── (depth limit reached)")
-        return "\n".join(lines)
+        return ToolResult(content="\n".join(lines), ui_summary="Listed directory (depth 0)")
         
     tree_iterator = generate_tree(target, level=target_level)
     
     for line in itertools.islice(tree_iterator, MAX_LS_ENTRIES):
         lines.append(line)
-        
+
+    entry_count = len(lines) - 1  # Exclude the root header line
+
     # If the iterator can still yield after MAX_LS_ENTRIES, we truncated.
-    if next(tree_iterator, None) is not None:
+    truncated = next(tree_iterator, None) is not None
+    if truncated:
         lines.append(
             f"\n... (Results truncated to {MAX_LS_ENTRIES} items. "
             "Use a smaller `depth` or a more specific path to explore further.)"
@@ -311,8 +319,12 @@ async def _ls_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturn
         
     if len(lines) == 1:
         lines.append("└── [Empty Directory]")
-        
-    return "\n".join(lines)
+
+    summary = f"Listed {entry_count} entr{'ies' if entry_count != 1 else 'y'}"
+    if truncated:
+        summary += " (truncated)"
+
+    return ToolResult(content="\n".join(lines), ui_summary=summary)
 
 
 def register_fsearch_tools(registry: ToolRegistry, ctx: InvocationContext):

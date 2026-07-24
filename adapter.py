@@ -2,39 +2,17 @@
 
 from __future__ import annotations
 import os
-import sys
-import time
 import json
 import uuid
-import asyncio
 import hashlib
-import itertools
 from pathlib import Path
-from typing import Any, Awaitable, TypeVar, Union
+from typing import Any, Union
 
 from typedefs import (
     AssistantMessage, SystemMessage, UserMessage, Message,
     TextMessageContent, ThinkingMessageContent,
     ToolUseMessageContent, ToolResultMessageContent
 )
-
-T = TypeVar("T")
-
-async def spinner(awaitable: Awaitable[T]) -> T:
-    """Displays a terminal spinner during API calls."""
-    if not sys.stdout.isatty():
-        return await awaitable
-    t0, spin, task = time.time(), itertools.cycle("🌑🌒🌓🌔🌕🌖🌗🌘"), asyncio.ensure_future(awaitable)
-    try:
-        while True:
-            sys.stdout.write(f"\r{next(spin)} {time.time() - t0:.1f}s")
-            sys.stdout.flush()
-            try:
-                return await asyncio.wait_for(asyncio.shield(task), timeout=0.2)
-            except asyncio.TimeoutError:
-                continue
-    finally:
-        sys.stdout.write("\r" + " " * 30 + "\r")
 
 
 def format_tool_desc(tool: Any) -> dict[str, Any]:
@@ -244,6 +222,7 @@ async def acompletion(
     else:
         kwargs["user"] = openai_prompt_cache_key
 
-    # Call LLM through spinner
-    response = await spinner(litellm.acompletion(**kwargs))
+    # Call the LLM. Progress indication is the caller's responsibility
+    # (the agent loop wraps this call in a UI status spinner).
+    response = await litellm.acompletion(**kwargs)
     return parse_assistant_response(response)

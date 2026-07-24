@@ -7,6 +7,10 @@ from unittest.mock import patch
 # Adjust import paths depending on your exact project structure
 from tools.filesearch import _ls_impl
 from typedefs import ToolFailure
+from helpers import unwrapped
+
+# Tests assert on the raw LLM-facing content; unwrap the ToolResult envelope.
+_ls_impl = unwrapped(_ls_impl)
 from sessioncontext import InvocationContext
 
 # gemini 3.1-pro
