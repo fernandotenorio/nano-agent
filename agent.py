@@ -34,6 +34,16 @@ from ui.summaries import summarize_call
 load_dotenv(".env.development")
 logging.basicConfig(level=logging.WARNING)
 
+# Grace period for draining stdout/stderr after the process exits. A shell
+# that backgrounds a child hands it the pipe write-ends, so EOF may never
+# arrive; we take whatever was captured and move on.
+SHELL_DRAIN_GRACE = 5.0
+
+
+def _decode_output(parts: list[bytes], limit: int) -> str:
+    return b''.join(parts).decode('utf-8', errors='replace')[:limit]
+
+
 async def handle_shell(callback: ShellCallback, ctx: InvocationContext) -> tuple[str, bool, str]:
     """
     Executes a shell command natively with timeouts and streaming partial output.
@@ -62,7 +72,7 @@ async def handle_shell(callback: ShellCallback, ctx: InvocationContext) -> tuple
         while chunk := await stream.read(8192):
             if sum(len(part) for part in parts) < MAX_OUTPUT:
                 parts.append(chunk)
-        return b''.join(parts).decode('utf-8', errors='replace')[:MAX_OUTPUT]
+        return _decode_output(parts, MAX_OUTPUT)
 
     stdout_task = asyncio.create_task(read_stream(process.stdout, stdout_parts))
     stderr_task = asyncio.create_task(read_stream(process.stderr, stderr_parts))
@@ -80,7 +90,21 @@ async def handle_shell(callback: ShellCallback, ctx: InvocationContext) -> tuple
             await process.wait()
         exit_code = "timeout"
     
-    stdout, stderr = await asyncio.gather(stdout_task, stderr_task)
+    # The process being gone doesn't guarantee EOF: a backgrounded grandchild
+    # inherits the pipe write-ends and can hold them open forever. Bound the
+    # drain and keep whatever was captured so far.
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            asyncio.gather(stdout_task, stderr_task), SHELL_DRAIN_GRACE
+        )
+        drained = True
+    except asyncio.TimeoutError:
+        stdout_task.cancel()
+        stderr_task.cancel()
+        stdout = _decode_output(stdout_parts, MAX_OUTPUT)
+        stderr = _decode_output(stderr_parts, MAX_OUTPUT)
+        drained = False
+
     elapsed = time.monotonic() - started_at
     
     # Format the result just like mini_agent
@@ -96,8 +120,12 @@ async def handle_shell(callback: ShellCallback, ctx: InvocationContext) -> tuple
         is_error = True
         text = f"{stderr}\n{stdout}"
         ui_summary = f"Shell exited with code {exit_code} ({elapsed:.1f}s)"
-        
-    return text.strip() or "Command completed with no output.", is_error, ui_summary
+
+    text = text.strip() or "Command completed with no output."
+    if not drained:
+        text += "\n(Output streams stayed open, likely a backgrounded process; showing partial output.)"
+
+    return text, is_error, ui_summary
 
 
 async def handle_subagent(

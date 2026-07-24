@@ -362,18 +362,24 @@ class TestHandleShellGroup3(unittest.IsolatedAsyncioTestCase):
             workspace_is_git_repo=False
         )
 
-    def _create_mock_process(self, stdout_data: bytes, stderr_data: bytes, exit_code: int = 0, hang_time: float = 0):
-        """Helper to create a fake asyncio subprocess with pre-filled streams."""
+    def _create_mock_process(self, stdout_data: bytes, stderr_data: bytes, exit_code: int = 0, hang_time: float = 0, eof: bool = True):
+        """
+        Helper to create a fake asyncio subprocess with pre-filled streams.
+        Pass eof=False to simulate a backgrounded grandchild holding the pipe
+        write-ends open, so the readers never see EOF.
+        """
         process = MagicMock()
         
         # 1. Setup real asyncio StreamReaders
         stdout_stream = asyncio.StreamReader()
         stdout_stream.feed_data(stdout_data)
-        stdout_stream.feed_eof()
         
         stderr_stream = asyncio.StreamReader()
         stderr_stream.feed_data(stderr_data)
-        stderr_stream.feed_eof()
+
+        if eof:
+            stdout_stream.feed_eof()
+            stderr_stream.feed_eof()
         
         process.stdout = stdout_stream
         process.stderr = stderr_stream
@@ -474,6 +480,55 @@ class TestHandleShellGroup3(unittest.IsolatedAsyncioTestCase):
         self.assertIn("partial out", text)  # We should still capture what was emitted before timeout
         
         # Ensure we tried to safely terminate, and when it didn't respond to that, kill it
+        mock_process.terminate.assert_called_once()
+        mock_process.kill.assert_called_once()
+
+    @patch("agent.SHELL_DRAIN_GRACE", 0.05)
+    @patch("builtins.print")
+    @patch("asyncio.create_subprocess_shell")
+    async def test_drain_grace_on_clean_exit(self, mock_create_shell, mock_print):
+        """
+        Test 3.6: Bounded Drain After a Clean Exit
+        A shell that backgrounds a child exits 0 while the grandchild keeps the
+        pipe write-ends open, so EOF never arrives. The drain must give up and
+        return the partial output instead of hanging forever.
+        """
+        # Setup: exit code 0, but the streams never reach EOF
+        mock_process = self._create_mock_process(b"partial out", b"", exit_code=0, eof=False)
+        mock_create_shell.return_value = mock_process
+
+        # Action
+        text, is_error, ui_summary = await handle_shell(self.callback, self.ctx)
+
+        # Assertions
+        self.assertFalse(is_error)  # A clean exit is not a timeout
+        self.assertIn("partial out", text)
+        self.assertIn("Output streams stayed open", text)
+        self.assertNotIn("timed out", ui_summary)
+
+    @patch("agent.SHELL_DRAIN_GRACE", 0.05)
+    @patch("builtins.print")
+    @patch("asyncio.create_subprocess_shell")
+    async def test_drain_grace_on_timeout(self, mock_create_shell, mock_print):
+        """
+        Test 3.7: Bounded Drain After a Timeout
+        Killing the process doesn't close pipes held by a grandchild, so the
+        post-kill drain must also be bounded while still reporting the timeout
+        and whatever output was captured.
+        """
+        # Setup: process hangs past the 0.1s timeout AND the streams never EOF
+        mock_process = self._create_mock_process(b"partial out", b"", hang_time=10.0, eof=False)
+        mock_create_shell.return_value = mock_process
+
+        # Action
+        text, is_error, _ui_summary = await handle_shell(self.callback, self.ctx)
+
+        # Assertions
+        self.assertTrue(is_error)
+        self.assertIn("Command timed out after 0.1s", text)
+        self.assertIn("partial out", text)
+        self.assertIn("Output streams stayed open", text)
+
         mock_process.terminate.assert_called_once()
         mock_process.kill.assert_called_once()
 
