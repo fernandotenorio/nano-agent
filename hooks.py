@@ -4,6 +4,7 @@ from pathlib import Path
 from textwrap import dedent
 from typing import Literal, Callable, Awaitable
 from typedefs import TextMessageContent
+from capabilities import Capabilities, model_warnings
 from config import AppConfig
 from context import gather_context_files
 from sessioncontext import AgentPolicy, AgentMode
@@ -141,6 +142,38 @@ async def initial_setup_hook(
         </system-reminder>''')
         event.context_pre.append(TextMessageContent(text=reminder))
         
+    return event
+
+
+# ---------------------------------------------------------
+# Built-in Hook: Degraded Capability Notice
+# ---------------------------------------------------------
+
+async def capabilities_hook(
+    event: UserPromptEvent,
+    capabilities: Capabilities,
+) -> UserPromptEvent:
+    """Warns about degraded capabilities on the very first user prompt.
+
+    The system prompt carries the same warning, but only for a fresh session:
+    `build_system_prompt` runs once, when the transcript is empty. A resumed
+    transcript therefore describes the machine as it was, which may no longer be
+    true — so the warning is repeated here, where it is recomputed every run.
+    """
+    if not event.is_first_prompt:
+        return event
+
+    warnings = model_warnings(capabilities)
+    if not warnings:
+        return event
+
+    reminder = dedent("""
+    <system-reminder>
+    {warnings}
+    </system-reminder>""").format(warnings="\n\n".join(warnings))
+
+    event.context_pre.append(TextMessageContent(text=reminder))
+
     return event
 
 

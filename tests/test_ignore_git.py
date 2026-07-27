@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from sessioncontext import InvocationContext
 from tools.filesearch import _glob_impl, _ls_impl
-from tools.ignore import IgnoreMatcher
+from tools.ignore import GitStatus, IgnoreMatcher
 from helpers import unwrapped
 
 # Tests assert on the raw LLM-facing content; unwrap the ToolResult envelope.
@@ -219,6 +219,31 @@ class TestGitIgnoreIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn("notes.txt", result)
         self.assertNotIn("key.txt", result)
 
+    async def test_listings_admit_when_git_could_not_be_consulted(self):
+        """Without git's verdict these listings widen, so they say so."""
+        self._gitignore("*.log")
+        self._write("app.log")
+        self._write("main.py")
+
+        with patch("tools.ignore.subprocess.run", side_effect=OSError("no git")):
+            listing = await _ls_impl({"path": str(self.workspace)}, self.ctx)
+            globbed = await _glob_impl({"pattern": "*.py", "path": str(self.workspace)}, self.ctx)
+
+        self.assertIn("app.log", listing)
+        self.assertIn("git could not be consulted", listing)
+
+        # One notice per agent, not one per tool call.
+        self.assertNotIn("git could not be consulted", globbed)
+
+    async def test_healthy_listings_carry_no_caveat(self):
+        self._gitignore("*.log")
+        self._write("app.log")
+        self._write("main.py")
+
+        listing = await _ls_impl({"path": str(self.workspace)}, self.ctx)
+
+        self.assertNotIn("git could not be consulted", listing)
+
     # ---------------------------------------------------------
     # GROUP 4: Opting out, and failing open
     # ---------------------------------------------------------
@@ -233,6 +258,7 @@ class TestGitIgnoreIntegration(unittest.IsolatedAsyncioTestCase):
 
         run.assert_not_called()
         self.assertFalse(matcher.ignores_relative("app.log", is_dir=False))
+        self.assertIs(matcher.git_status, GitStatus.UNUSED)
 
     def test_git_error_fails_open(self):
         """A broken git must never blank out the workspace."""
@@ -265,6 +291,60 @@ class TestGitIgnoreIntegration(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(matcher.ignores_relative("app.log", is_dir=False))
 
+    # ---------------------------------------------------------
+    # GROUP 5: Reporting why git was silent
+    # ---------------------------------------------------------
+
+    def test_status_is_ok_in_a_healthy_repo(self):
+        matcher = IgnoreMatcher(self.workspace)
+
+        self.assertIs(matcher.git_status, GitStatus.OK)
+        self.assertFalse(matcher.git_status.degraded)
+        self.assertEqual(matcher.git_error, "")
+
+    def test_missing_binary_is_reported_as_unavailable(self):
+        with patch("tools.ignore.subprocess.run", side_effect=OSError("no git")):
+            matcher = IgnoreMatcher(self.workspace)
+
+        self.assertIs(matcher.git_status, GitStatus.UNAVAILABLE)
+        self.assertTrue(matcher.git_status.degraded)
+        self.assertIn("no git", matcher.git_error)
+
+    def test_timeout_is_reported_as_failed(self):
+        timeout = subprocess.TimeoutExpired(cmd="git", timeout=5.0)
+
+        with patch("tools.ignore.subprocess.run", side_effect=timeout):
+            matcher = IgnoreMatcher(self.workspace)
+
+        self.assertIs(matcher.git_status, GitStatus.FAILED)
+        self.assertTrue(matcher.git_status.degraded)
+
+    def test_refusal_keeps_gits_own_explanation(self):
+        """'dubious ownership' is the common real-world failure; keep the reason."""
+        refused = MagicMock(
+            returncode=128,
+            stdout=b"",
+            stderr=b"\nfatal: detected dubious ownership in repository at 'C:/repo'\n",
+        )
+
+        with patch("tools.ignore.subprocess.run", return_value=refused):
+            matcher = IgnoreMatcher(self.workspace)
+
+        self.assertIs(matcher.git_status, GitStatus.FAILED)
+        self.assertEqual(
+            matcher.git_error,
+            "fatal: detected dubious ownership in repository at 'C:/repo'",
+        )
+
+    def test_refusal_without_stderr_still_explains_itself(self):
+        refused = MagicMock(returncode=3, stdout=b"", stderr=b"")
+
+        with patch("tools.ignore.subprocess.run", return_value=refused):
+            matcher = IgnoreMatcher(self.workspace)
+
+        self.assertIs(matcher.git_status, GitStatus.FAILED)
+        self.assertIn("exited with code 3", matcher.git_error)
+
 
 class TestNonRepoWorkspace(unittest.TestCase):
     """Outside a repository nothing changes: we never parse .gitignore ourselves."""
@@ -278,9 +358,11 @@ class TestNonRepoWorkspace(unittest.TestCase):
 
     def test_no_subprocess_without_a_git_directory(self):
         with patch("tools.ignore.subprocess.run") as run:
-            IgnoreMatcher(self.workspace)
+            matcher = IgnoreMatcher(self.workspace)
 
         run.assert_not_called()
+        self.assertIs(matcher.git_status, GitStatus.UNUSED)
+        self.assertFalse(matcher.git_status.degraded)
 
     def test_gitignore_is_not_parsed_outside_a_repo(self):
         (self.workspace / ".gitignore").write_text("*.log\n", encoding="utf-8")
@@ -289,6 +371,30 @@ class TestNonRepoWorkspace(unittest.TestCase):
         matcher = IgnoreMatcher(self.workspace)
 
         self.assertFalse(matcher.ignores_relative("app.log", is_dir=False))
+
+    def test_an_empty_git_folder_is_not_a_repository(self):
+        """A '.git' directory without a HEAD is not worth running git over.
+
+        Without this, every such workspace would warn about .gitignore rules
+        that were never in play.
+        """
+        (self.workspace / ".git").mkdir()
+
+        with patch("tools.ignore.subprocess.run") as run:
+            matcher = IgnoreMatcher(self.workspace)
+
+        run.assert_not_called()
+        self.assertIs(matcher.git_status, GitStatus.UNUSED)
+
+    def test_a_git_file_marks_a_worktree(self):
+        """Worktrees and submodules use a '.git' file rather than a directory."""
+        (self.workspace / ".git").write_text("gitdir: /elsewhere/.git/worktrees/x\n", encoding="utf-8")
+
+        with patch("tools.ignore.subprocess.run", side_effect=OSError("no git")) as run:
+            matcher = IgnoreMatcher(self.workspace)
+
+        run.assert_called_once()
+        self.assertIs(matcher.git_status, GitStatus.UNAVAILABLE)
 
 
 if __name__ == "__main__":

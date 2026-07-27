@@ -7,6 +7,8 @@ import fnmatch
 import itertools
 from pathlib import Path
 from textwrap import dedent
+from capabilities import IGNORE_WIDENED_NOTE
+from notices import with_note
 from tools.ignore import IgnoreMatcher
 from tools.paths import resolve_in_workspace
 from tools.registry import ToolRegistry, ToolReturnType
@@ -17,6 +19,27 @@ from wcmatch import glob
 
 MAX_GLOB_RESULTS: int = 100
 MAX_LS_ENTRIES: int = 400
+
+
+def _annotate(
+    result: ToolResult,
+    matcher: IgnoreMatcher,
+    ctx: InvocationContext,
+) -> ToolResult:
+    """Appends the degraded-git caveat, at most once per agent.
+
+    Without git's verdict the matcher only knows the built-ins and
+    .prismaignore, so listings quietly widen to include whatever the repository
+    ignores. Saying so once is cheaper than the agent drawing conclusions from
+    a vendored copy of a file.
+    """
+    if not matcher.git_status.degraded:
+        return result
+
+    if not ctx.notices.once("git-degraded-listing"):
+        return result
+
+    return with_note(result, IGNORE_WIDENED_NOTE)
 
 
 async def _glob_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturnType:
@@ -153,7 +176,11 @@ async def _glob_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
     if truncated:
         summary += f" (showing {MAX_GLOB_RESULTS})"
 
-    return ToolResult(content="\n".join(lines), ui_summary=summary)
+    return _annotate(
+        ToolResult(content="\n".join(lines), ui_summary=summary),
+        ignore_matcher,
+        ctx,
+    )
 
 
 async def _ls_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturnType:
@@ -324,7 +351,11 @@ async def _ls_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturn
     if truncated:
         summary += " (truncated)"
 
-    return ToolResult(content="\n".join(lines), ui_summary=summary)
+    return _annotate(
+        ToolResult(content="\n".join(lines), ui_summary=summary),
+        matcher,
+        ctx,
+    )
 
 
 def register_fsearch_tools(registry: ToolRegistry, ctx: InvocationContext):

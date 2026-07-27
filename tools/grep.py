@@ -2,9 +2,10 @@
 """
 Content search backed by the ripgrep CLI.
 
-Prisma does not implement its own regex file walker: ripgrep is faster than
-anything we could write in Python, already understands .gitignore, and is on
-most developer machines. This module is the adapter around it.
+Prisma does not implement its own regex file walker when it can avoid it:
+ripgrep is faster than anything we could write in Python and is on most
+developer machines. This module is the adapter around it. When rg is absent,
+tools/grep_fallback.py takes over and the model is none the wiser.
 
 Two invariants shape the implementation:
 
@@ -21,6 +22,11 @@ Two invariants shape the implementation:
      (and therefore IgnoreMatcher) keeps tracked files visible. That drift
      would make Grep silently miss deliberately committed files such as a
      `.env.example` under `.env*`, or a checked-in `dist/` bundle.
+
+Invariant 2 holds only while git can actually be asked. When it cannot, the
+export carries no git verdict at all, and insisting on --no-ignore-vcs would
+turn a small inconsistency into a search that walks node_modules and .env. So
+that one case hands .gitignore back to ripgrep and says so in the result.
 """
 
 from __future__ import annotations
@@ -28,82 +34,40 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-import shutil
 import tempfile
 from pathlib import Path
 from textwrap import dedent
 from typing import Any
 
+from capabilities import RIPGREP_GITIGNORE_NOTE
+from notices import with_note
 from sessioncontext import InvocationContext
+from tools import grep_render as render
+from tools.grep_args import (
+    OUTPUT_MODES,
+    as_count,
+    as_flag,
+    as_str_list,
+    parse_request,
+)
+from tools.grep_render import GrepRecord, RecordKind
 from tools.ignore import IgnoreMatcher
-from tools.paths import resolve_in_workspace
 from tools.registry import ToolRegistry, ToolReturnType
 from typedefs import ToolFailure, ToolResult
-
-# Output caps. Content lines and file rows are counted separately because the
-# two output modes have very different information density.
-MAX_GREP_LINES: int = 200
-MAX_GREP_FILES: int = 100
 
 # Hard ceiling on what we read from ripgrep. Reaching it kills the search:
 # there is no point in scanning further when we already have more than we can
 # show. Long lines are clipped by ripgrep itself (see MAX_LINE_COLUMNS).
 MAX_OUTPUT_BYTES: int = 400_000
 MAX_STDERR_BYTES: int = 8_000
-MAX_LINE_COLUMNS: int = 250
 
 RG_TIMEOUT: float = 30.0
 RG_DRAIN_GRACE: float = 5.0
 RG_ERROR_LINES: int = 8
 
-OUTPUT_MODES = ("content", "files_with_matches", "count")
-
 # With --null, every record starts with 'path\0'. In content mode the rest is
 # 'NUM:text' for a match and 'NUM-text' for a context line.
 _CONTENT_PAYLOAD = re.compile(r"^(\d+)([:-])(.*)$", re.DOTALL)
-
-_RG_MISSING_ERROR = dedent("""\
-    Error: ripgrep (rg) was not found on PATH, so content search is unavailable.
-    Install ripgrep, or fall back to the Glob tool for filename search and the
-    Shell tool for one-off content searches.""")
-
-
-def _as_str_list(value: Any) -> list[str]:
-    """Coerces a schema 'array of string' field the LLM may send as a string."""
-    if isinstance(value, str):
-        return [value] if value.strip() else []
-
-    if isinstance(value, list):
-        return [item for item in value if isinstance(item, str) and item.strip()]
-
-    return []
-
-
-def _as_flag(kwargs: dict[str, Any], *names: str, default: bool = False) -> bool:
-    """Reads a boolean field, accepting any of its accepted spellings."""
-    for name in names:
-        if name in kwargs and kwargs[name] is not None:
-            return bool(kwargs[name])
-
-    return default
-
-
-def _as_count(kwargs: dict[str, Any], *names: str) -> int | None:
-    """Reads a positive integer field; ignores junk instead of failing."""
-    for name in names:
-        raw = kwargs.get(name)
-        if raw is None:
-            continue
-
-        try:
-            value = int(raw)
-        except (TypeError, ValueError):
-            continue
-
-        if value > 0:
-            return value
-
-    return None
 
 
 def _write_ignore_file(patterns: list[str]) -> str:
@@ -137,31 +101,39 @@ def _build_rg_args(
     pattern: str,
     ignore_file: str,
     target: str,
+    *,
+    own_vcs_ignores: bool,
 ) -> list[str]:
-    """Translates tool arguments into a ripgrep command line."""
+    """Translates tool arguments into a ripgrep command line.
+
+    `own_vcs_ignores` is True while our --ignore-file speaks for git; when it is
+    False, ripgrep is left to read .gitignore itself.
+    """
     args = [
         rg,
         "--color", "never",
         "--crlf",                # so '^' and '$' anchor correctly on CRLF files
         "--no-messages",         # unreadable files are not the model's problem
         "--hidden",              # dotfiles are searchable, like Glob's DOTGLOB
-        "--no-ignore-vcs",       # .gitignore reaches us through --ignore-file
         "--with-filename",       # rg omits it for single-file searches
         "--no-heading",          # one self-describing record per line
         "--null",                # 'path\0...': unambiguous on every platform
         "--sortr", "modified",   # newest first (like Glob), and deterministic
-        "--max-columns", str(MAX_LINE_COLUMNS),
+        "--max-columns", str(render.MAX_LINE_COLUMNS),
         "--max-columns-preview",
         "--ignore-file", ignore_file,
     ]
 
-    if _as_flag(kwargs, "-i", "case_insensitive"):
+    if own_vcs_ignores:
+        args.append("--no-ignore-vcs")  # .gitignore reaches us through --ignore-file
+
+    if as_flag(kwargs, "-i", "case_insensitive"):
         args.append("--ignore-case")
 
-    if _as_flag(kwargs, "multiline"):
+    if as_flag(kwargs, "multiline"):
         args.extend(["--multiline", "--multiline-dotall"])
 
-    for pattern_glob in _as_str_list(kwargs.get("glob")):
+    for pattern_glob in as_str_list(kwargs.get("glob")):
         args.extend(["--glob", pattern_glob])
 
     file_type = kwargs.get("type")
@@ -173,13 +145,13 @@ def _build_rg_args(
     elif output_mode == "count":
         args.append("--count-matches")
     else:
-        if _as_flag(kwargs, "-n", "line_numbers", default=True):
+        if as_flag(kwargs, "-n", "line_numbers", default=True):
             args.append("--line-number")
 
         for flag, names in (("--after-context", ("-A", "after_context")),
                             ("--before-context", ("-B", "before_context")),
                             ("--context", ("-C", "context"))):
-            count = _as_count(kwargs, *names)
+            count = as_count(kwargs, *names)
             if count is not None:
                 args.extend([flag, str(count)])
 
@@ -277,26 +249,11 @@ async def _run_rg(args: list[str], cwd: Path) -> tuple[str, bool] | ToolFailure:
     return ToolFailure(error_message=f"Error: {detail}")
 
 
-def _absolute(workspace: Path, relative_path: str) -> str:
-    """Turns a ripgrep-reported path into an absolute one Read can consume."""
-    return str(workspace / relative_path)
-
-
-def _render_content(
-    stdout: str,
-    workspace: Path,
-    max_lines: int,
-) -> tuple[list[str], int, int, bool]:
-    """Groups ripgrep's records under one header per file.
-
-    Returns (lines, match_count, file_count, truncated).
-    """
-    lines: list[str] = []
+def _parse_content(stdout: str) -> list[GrepRecord]:
+    """Turns ripgrep's NUL-delimited content output into records."""
+    records: list[GrepRecord] = []
     current_file: str | None = None
-    matches = 0
-    files = 0
-    rendered = 0
-    truncated = False
+    pending_gap = False
 
     for raw in stdout.split("\n"):
         record = raw.rstrip("\r")
@@ -304,69 +261,68 @@ def _render_content(
             continue
 
         if "\0" not in record:
-            # Either rg's '--' separator between context blocks, or the tail of
-            # a multiline match, which rg prints without repeating the path.
-            if current_file is None or rendered >= max_lines:
+            if record.strip() == "--":
+                # rg's marker between non-adjacent context blocks.
+                pending_gap = True
                 continue
 
-            lines.append("  ..." if record.strip() == "--" else f"      {record}")
-            rendered += 1
+            if current_file is None:
+                continue
+
+            # Tail of a multiline match: rg does not repeat the path.
+            records.append(
+                GrepRecord(
+                    path=current_file,
+                    kind=RecordKind.CONTINUATION,
+                    text=record,
+                )
+            )
             continue
 
         relative_path, payload = record.split("\0", 1)
-
-        if rendered >= max_lines:
-            truncated = True
-            break
-
-        if relative_path != current_file:
-            current_file = relative_path
-            files += 1
-            lines.append(_absolute(workspace, relative_path))
+        current_file = relative_path
 
         parsed = _CONTENT_PAYLOAD.match(payload)
         if parsed:
             line_no, separator, text = parsed.groups()
-            lines.append(f"{line_no:>5}{separator}{text}")
-            if separator == ":":
-                matches += 1
+            records.append(
+                GrepRecord(
+                    path=relative_path,
+                    kind=RecordKind.MATCH if separator == ":" else RecordKind.CONTEXT,
+                    text=text,
+                    line_no=int(line_no),
+                    gap_before=pending_gap,
+                )
+            )
         else:
-            # Line numbers were switched off; the payload is the raw line.
-            lines.append(f"     :{payload}")
-            matches += 1
+            # Line numbers were switched off; the payload is the raw line, and
+            # context lines are indistinguishable from matches.
+            records.append(
+                GrepRecord(
+                    path=relative_path,
+                    kind=RecordKind.MATCH,
+                    text=payload,
+                    gap_before=pending_gap,
+                )
+            )
 
-        rendered += 1
+        pending_gap = False
 
-    return lines, matches, files, truncated
+    return records
 
 
-def _render_file_list(
-    stdout: str,
-    workspace: Path,
-    max_files: int,
-) -> tuple[list[str], int, bool]:
-    """Renders --files-with-matches output (NUL-separated, no line breaks)."""
-    paths = [
+def _parse_file_list(stdout: str) -> list[str]:
+    """Parses --files-with-matches output (NUL-separated, no line breaks)."""
+    return [
         entry.strip("\r\n")
         for entry in stdout.split("\0")
         if entry.strip("\r\n")
     ]
 
-    lines = [_absolute(workspace, path) for path in paths[:max_files]]
 
-    return lines, len(paths), len(paths) > max_files
-
-
-def _render_counts(
-    stdout: str,
-    workspace: Path,
-    max_files: int,
-) -> tuple[list[str], int, int, bool]:
-    r"""Renders --count-matches output ('path\0count' per line)."""
-    lines: list[str] = []
-    total = 0
-    files = 0
-    truncated = False
+def _parse_counts(stdout: str) -> list[tuple[str, int]]:
+    r"""Parses --count-matches output ('path\0count' per line)."""
+    counts: list[tuple[str, int]] = []
 
     for raw in stdout.split("\n"):
         record = raw.rstrip("\r")
@@ -376,59 +332,28 @@ def _render_counts(
         relative_path, payload = record.split("\0", 1)
 
         try:
-            count = int(payload.strip())
+            counts.append((relative_path, int(payload.strip())))
         except ValueError:
             continue
 
-        total += count
-        files += 1
-
-        if len(lines) >= max_files:
-            truncated = True
-            continue
-
-        lines.append(f"{_absolute(workspace, relative_path)}: {count}")
-
-    return lines, total, files, truncated
+    return counts
 
 
-async def _grep_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolReturnType:
+async def _grep_impl(
+    kwargs: dict[str, Any],
+    ctx: InvocationContext,
+    rg: str,
+) -> ToolReturnType:
     """Searches file contents with ripgrep, honouring Prisma's ignore rules."""
-    pattern = kwargs.get("pattern")
-    path_str = kwargs.get("path", ".")
-    output_mode = kwargs.get("output_mode") or "content"
-
-    if not isinstance(pattern, str) or not pattern:
-        return ToolFailure(error_message="Error: pattern is required.")
-
-    if not isinstance(path_str, str):
-        return ToolFailure(error_message="Error: path must be a string.")
-
-    if output_mode not in OUTPUT_MODES:
-        return ToolFailure(
-            error_message=f"Error: output_mode must be one of: {', '.join(OUTPUT_MODES)}."
-        )
-
-    # Workspace boundary check (resolves relative paths against ctx.cwd)
-    target = resolve_in_workspace(path_str, ctx)
-    if isinstance(target, ToolFailure):
-        return target
-
-    if not target.exists():
-        return ToolFailure(error_message=f"Error: Path does not exist: {target}")
-
-    rg = shutil.which("rg")
-    if rg is None:
-        return ToolFailure(error_message=_RG_MISSING_ERROR)
-
-    workspace = ctx.workspace.resolve()
-    relative_target = target.relative_to(workspace).as_posix()
+    request = parse_request(kwargs, ctx)
+    if isinstance(request, ToolFailure):
+        return request
 
     # The same matcher Glob and ls build, exported wholesale so all three tools
     # search and list exactly the same set of files.
     matcher = IgnoreMatcher(
-        workspace=workspace,
-        extra_patterns=_as_str_list(kwargs.get("exclude")),
+        workspace=request.workspace,
+        extra_patterns=request.excludes,
     )
 
     try:
@@ -440,12 +365,13 @@ async def _grep_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
         args = _build_rg_args(
             rg,
             kwargs,
-            output_mode,
-            pattern,
+            request.output_mode,
+            request.pattern,
             ignore_file,
-            relative_target or ".",
+            request.relative_target,
+            own_vcs_ignores=not matcher.git_status.degraded,
         )
-        outcome = await _run_rg(args, cwd=workspace)
+        outcome = await _run_rg(args, cwd=request.workspace)
     finally:
         _remove_quietly(ignore_file)
 
@@ -454,62 +380,40 @@ async def _grep_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
 
     stdout, found = outcome
     if not found or not stdout.strip():
-        return ToolResult(content="No matches found.", ui_summary="Found 0 matches")
-
-    head_limit = _as_count(kwargs, "head_limit")
-
-    if output_mode == "files_with_matches":
-        max_files = min(head_limit or MAX_GREP_FILES, MAX_GREP_FILES)
-        lines, files, truncated = _render_file_list(stdout, workspace, max_files)
-
-        if truncated:
-            lines.append(
-                f"(Results are truncated to {max_files} files. "
-                "Consider a more specific path, glob, or pattern.)"
-            )
-
-        summary = f"Found {files} file{'s' if files != 1 else ''} with matches"
-        if truncated:
-            summary += f" (showing {max_files})"
-
-        return ToolResult(content="\n".join(lines), ui_summary=summary)
-
-    if output_mode == "count":
-        max_files = min(head_limit or MAX_GREP_FILES, MAX_GREP_FILES)
-        lines, total, files, truncated = _render_counts(stdout, workspace, max_files)
-
-        if truncated:
-            lines.append(
-                f"(Results are truncated to {max_files} files. "
-                "Consider a more specific path, glob, or pattern.)"
-            )
-
-        lines.append(f"\nTotal: {total} match{'es' if total != 1 else ''} in {files} file{'s' if files != 1 else ''}")
-
-        summary = f"Found {total} match{'es' if total != 1 else ''} in {files} file{'s' if files != 1 else ''}"
-        return ToolResult(content="\n".join(lines), ui_summary=summary)
-
-    max_lines = min(head_limit or MAX_GREP_LINES, MAX_GREP_LINES)
-    lines, matches, files, truncated = _render_content(stdout, workspace, max_lines)
-
-    if truncated:
-        lines.append(
-            f"\n(Results are truncated to {max_lines} lines. "
-            "Consider a more specific pattern or path, or use "
-            "output_mode='files_with_matches' to see which files match.)"
+        result = render.no_matches()
+    elif request.output_mode == "files_with_matches":
+        result = render.render_file_list(
+            _parse_file_list(stdout), request.workspace, request.head_limit
+        )
+    elif request.output_mode == "count":
+        result = render.render_counts(
+            _parse_counts(stdout), request.workspace, request.head_limit
+        )
+    else:
+        result = render.render_content(
+            _parse_content(stdout), request.workspace, request.head_limit
         )
 
-    summary = (
-        f"Found {matches} match{'es' if matches != 1 else ''} "
-        f"in {files} file{'s' if files != 1 else ''}"
-    )
-    if truncated:
-        summary += " (truncated)"
-
-    return ToolResult(content="\n".join(lines), ui_summary=summary)
+    return _annotate(result, matcher, ctx)
 
 
-def register_grep_tools(registry: ToolRegistry, ctx: InvocationContext):
+def _annotate(
+    result: ToolResult,
+    matcher: IgnoreMatcher,
+    ctx: InvocationContext,
+) -> ToolResult:
+    """Appends the degraded-git caveat, at most once per agent."""
+    if not matcher.git_status.degraded:
+        return result
+
+    if not ctx.notices.once("git-degraded-ripgrep"):
+        return result
+
+    return with_note(result, RIPGREP_GITIGNORE_NOTE)
+
+
+def register_grep_tools(registry: ToolRegistry, ctx: InvocationContext, rg: str):
+    """Registers the ripgrep-backed Grep. `rg` must be a runnable binary path."""
     registry.register(
         name="Grep",
         description=dedent("""\
@@ -607,6 +511,6 @@ def register_grep_tools(registry: ToolRegistry, ctx: InvocationContext):
             },
             "required": ["pattern"]
         },
-        func=lambda kwargs: _grep_impl(kwargs, ctx),
+        func=lambda kwargs: _grep_impl(kwargs, ctx, rg),
         is_readonly = True
     )

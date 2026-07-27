@@ -1,7 +1,9 @@
 import unittest
 from unittest.mock import patch
 
-from hooks import HookManager, initial_setup_hook, UserPromptEvent
+from capabilities import Capabilities
+from hooks import HookManager, capabilities_hook, initial_setup_hook, UserPromptEvent
+from tools.ignore import GitStatus
 from typedefs import TextMessageContent
 
 
@@ -188,6 +190,51 @@ class TestHooks(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<system-reminder>", injected_text)
         self.assertIn("Always write unit tests.", injected_text)
         self.assertIn("</system-reminder>", injected_text)
+
+    # ---------------------------------------------------------
+    # GROUP 5: Built-in capabilities_hook
+    # ---------------------------------------------------------
+
+    async def test_degraded_git_is_announced_on_the_first_prompt(self):
+        event = UserPromptEvent(prompt="start task", is_first_prompt=True)
+        capabilities = Capabilities(git_status=GitStatus.UNAVAILABLE, git_error="no git")
+
+        result = await capabilities_hook(event, capabilities)
+
+        self.assertEqual(len(result.context_pre), 1)
+        injected_text = result.context_pre[0].text
+        self.assertIn("<system-reminder>", injected_text)
+        self.assertIn(".gitignore", injected_text)
+
+    async def test_nothing_is_announced_later_in_the_conversation(self):
+        """The warning belongs to the session, so it is stated once."""
+        event = UserPromptEvent(prompt="next task", is_first_prompt=False)
+        capabilities = Capabilities(git_status=GitStatus.UNAVAILABLE)
+
+        result = await capabilities_hook(event, capabilities)
+
+        self.assertEqual(len(result.context_pre), 0)
+
+    async def test_healthy_environment_injects_nothing(self):
+        event = UserPromptEvent(prompt="start task", is_first_prompt=True)
+        capabilities = Capabilities(ripgrep="/usr/bin/rg", git_status=GitStatus.OK)
+
+        result = await capabilities_hook(event, capabilities)
+
+        self.assertEqual(len(result.context_pre), 0)
+
+    async def test_missing_ripgrep_alone_injects_nothing(self):
+        """A missing rg changes nothing the model can observe, so it is not told.
+
+        This hook exists because a resumed transcript carries a stale system
+        prompt; repeating a warning the model cannot act on would only add noise.
+        """
+        event = UserPromptEvent(prompt="start task", is_first_prompt=True)
+        capabilities = Capabilities(ripgrep=None, git_status=GitStatus.OK)
+
+        result = await capabilities_hook(event, capabilities)
+
+        self.assertEqual(len(result.context_pre), 0)
 
 
 if __name__ == "__main__":

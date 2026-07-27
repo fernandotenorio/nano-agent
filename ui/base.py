@@ -32,6 +32,11 @@ class SessionInfo:
     transcript_path: Path
     git_branch: str | None = None
 
+    # Degraded capabilities worth surfacing at startup. These are for the user,
+    # not the agent: they describe things only the user can fix, such as a
+    # missing binary or a repository git refuses to read.
+    warnings: tuple[str, ...] = ()
+
 
 @dataclass(frozen=True)
 class ShellDecision:

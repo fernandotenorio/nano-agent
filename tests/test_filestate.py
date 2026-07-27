@@ -304,6 +304,12 @@ class TestFileStateTracking(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sub_ctx.workspace, self.ctx.workspace)
         self.assertEqual(sub_ctx.cwd, self.ctx.cwd)
 
+        # A sub-agent has its own conversation, so it has not read the parent's
+        # one-shot notices and must be told again.
+        self.ctx.notices.once("git-degraded-listing")
+        self.assertIsNot(sub_ctx.notices, self.ctx.notices)
+        self.assertFalse(sub_ctx.notices.seen("git-degraded-listing"))
+
         # The sub-agent cannot write a file only the parent has read
         result = await _write_impl({"file_path": str(path), "content": "sub overwrite"}, sub_ctx)
         self.assertIsInstance(result, ToolFailure)

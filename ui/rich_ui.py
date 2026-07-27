@@ -75,6 +75,10 @@ class RichUI(UI):
             c.print(f"[dim]Directory:[/dim] {escape(str(info.cwd))}")
         c.print(f"[dim]Transcript: {escape(str(info.transcript_path))}[/dim]")
         c.print("[dim]Type '/quit' to exit, '/plan' or '/build' to switch modes.[/dim]")
+
+        for warning in info.warnings:
+            c.print(f"[yellow]![/yellow] [dim]{escape(warning)}[/dim]")
+
         c.rule(characters=self._rule_char, style="dim")
 
     def mode_changed(self, mode: str) -> None:

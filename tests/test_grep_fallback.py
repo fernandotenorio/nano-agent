@@ -1,4 +1,3 @@
-import dataclasses
 import os
 import shutil
 import subprocess
@@ -8,26 +7,23 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from capabilities import Capabilities
 from sessioncontext import InvocationContext
-from tools import grep, grep_render
-from tools.core import register_grep_backend
-from tools.grep import _grep_impl, register_grep_tools
-from tools.ignore import GitStatus
+from tools import grep_render
+from tools.grep_fallback import _grep_impl, register_fallback_grep_tools
 from typedefs import ToolFailure, ToolResult
 from helpers import unwrap
 
-RG = shutil.which("rg")
 GIT = shutil.which("git")
 
 
-@unittest.skipUnless(RG, "ripgrep (rg) is not installed")
-class TestGrepTool(unittest.IsolatedAsyncioTestCase):
+class TestGrepFallback(unittest.IsolatedAsyncioTestCase):
     """
-    Test Suite for the Grep tool.
+    Test Suite for the built-in Grep engine used when ripgrep is absent.
 
-    Covers the three output modes, ripgrep flag plumbing, the ignore rules
-    shared with Glob/ls, output caps, and every failure path.
+    This engine has to behave like the ripgrep-backed one, because the model
+    cannot tell them apart: same output shapes, same ignore rules, same caps.
+    What it does not have to do is match ripgrep's feature list, so the `type`
+    filter is deliberately absent from its schema.
     """
 
     def setUp(self):
@@ -63,17 +59,9 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
     def _git(self, *args: str) -> None:
         subprocess.run([GIT, *args], cwd=self.workspace, capture_output=True, check=True)
 
-    async def _run(self, kwargs: dict):
-        """Invokes the ripgrep backend with this machine's rg binary.
-
-        The tool resolves rg once, at registration, so the implementation takes
-        it as an argument; every test in this class is skipped without it.
-        """
-        return await _grep_impl(kwargs, self.ctx, RG)
-
     async def _content(self, kwargs: dict) -> str:
         """Runs Grep and returns the LLM-facing content, asserting success."""
-        result = await self._run(kwargs)
+        result = await _grep_impl(kwargs, self.ctx)
         self.assertIsInstance(result, ToolResult, getattr(result, "error_message", ""))
         return unwrap(result)
 
@@ -82,22 +70,22 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
     # ---------------------------------------------------------
 
     async def test_missing_pattern(self):
-        result = await self._run({})
+        result = await _grep_impl({}, self.ctx)
         self.assertIsInstance(result, ToolFailure)
         self.assertIn("pattern is required", result.error_message)
 
     async def test_non_string_path(self):
-        result = await self._run({"pattern": "needle", "path": 42})
+        result = await _grep_impl({"pattern": "needle", "path": 42}, self.ctx)
         self.assertIsInstance(result, ToolFailure)
         self.assertIn("path must be a string", result.error_message)
 
     async def test_unknown_output_mode(self):
-        result = await self._run({"pattern": "needle", "output_mode": "sideways"})
+        result = await _grep_impl({"pattern": "needle", "output_mode": "sideways"}, self.ctx)
         self.assertIsInstance(result, ToolFailure)
         self.assertIn("output_mode must be one of", result.error_message)
 
     async def test_missing_path(self):
-        result = await self._run({"pattern": "needle", "path": "nowhere"})
+        result = await _grep_impl({"pattern": "needle", "path": "nowhere"}, self.ctx)
         self.assertIsInstance(result, ToolFailure)
         self.assertIn("Path does not exist", result.error_message)
 
@@ -106,37 +94,39 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
             external_path = Path(external).resolve()
             (external_path / "secret.txt").write_text("needle", encoding="utf-8")
 
-            result = await self._run({"pattern": "needle", "path": str(external_path)})
+            result = await _grep_impl({"pattern": "needle", "path": str(external_path)}, self.ctx)
 
             self.assertIsInstance(result, ToolFailure)
             self.assertIn("outside", result.error_message)
             self.assertIn("Access denied", result.error_message)
             self.assertNotIn("secret.txt", result.error_message)
 
-    async def test_invalid_regex_reports_ripgreps_explanation(self):
+    async def test_invalid_regex_is_explained(self):
         self._create_file("main.py", "needle")
 
-        result = await self._run({"pattern": "(unclosed"})
+        result = await _grep_impl({"pattern": "(unclosed"}, self.ctx)
 
         self.assertIsInstance(result, ToolFailure)
-        self.assertIn("regex parse error", result.error_message)
+        self.assertIn("invalid regular expression", result.error_message)
 
-    async def test_unknown_type_is_reported(self):
+    async def test_timeout_returns_partial_results(self):
+        """A slow search reports what it found rather than stalling the session."""
         self._create_file("main.py", "needle")
 
-        result = await self._run({"pattern": "needle", "type": "bogus-lang"})
+        with patch("tools.grep_fallback.SEARCH_TIMEOUT", -1.0):
+            content = await self._content({"pattern": "needle"})
 
-        self.assertIsInstance(result, ToolFailure)
-        self.assertIn("file type", result.error_message)
+        self.assertIn("stopped after", content)
 
-    async def test_timeout_is_reported(self):
-        self._create_file("main.py", "needle")
+    @patch("tools.grep_fallback.MAX_SCAN_FILES", 1)
+    async def test_file_budget_is_admitted_as_incomplete(self):
+        self._create_file("a.py", "needle")
+        self._create_file("b.py", "needle")
+        self._create_file("c.py", "needle")
 
-        with patch("tools.grep.RG_TIMEOUT", 0.0):
-            result = await self._run({"pattern": "needle"})
+        content = await self._content({"pattern": "needle"})
 
-        self.assertIsInstance(result, ToolFailure)
-        self.assertIn("timed out", result.error_message)
+        self.assertIn("incomplete", content)
 
     # ---------------------------------------------------------
     # GROUP 2: CONTENT MODE
@@ -154,7 +144,7 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
     async def test_no_matches(self):
         self._create_file("main.py", "nothing to see here")
 
-        result = await self._run({"pattern": "needle"})
+        result = await _grep_impl({"pattern": "needle"}, self.ctx)
 
         self.assertEqual(unwrap(result), "No matches found.")
         self.assertEqual(result.ui_summary, "Found 0 matches")
@@ -171,7 +161,7 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
     async def test_case_sensitive_by_default(self):
         self._create_file("main.py", "NEEDLE")
 
-        result = await self._run({"pattern": "needle"})
+        result = await _grep_impl({"pattern": "needle"}, self.ctx)
 
         self.assertEqual(unwrap(result), "No matches found.")
 
@@ -225,7 +215,7 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
     async def test_multiline_pattern(self):
         self._create_file("main.py", "alpha\nbeta\n")
 
-        single_line = await self._run({"pattern": r"alpha\s+beta"})
+        single_line = await _grep_impl({"pattern": r"alpha\s+beta"}, self.ctx)
         self.assertEqual(unwrap(single_line), "No matches found.")
 
         content = await self._content({"pattern": r"alpha\s+beta", "multiline": True})
@@ -287,6 +277,13 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
         self.assertIn(str(self.workspace / "src" / "main.py"), content)
         self.assertNotIn("readme.md", content)
 
+    async def test_nested_files_are_searched(self):
+        self._create_file("a/b/c/deep.py", "needle")
+
+        content = await self._content({"pattern": "needle"})
+
+        self.assertIn(str(self.workspace / "a" / "b" / "c" / "deep.py"), content)
+
     # ---------------------------------------------------------
     # GROUP 3: FILE FILTERS
     # ---------------------------------------------------------
@@ -294,6 +291,16 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
     async def test_glob_filter(self):
         self._create_file("main.py", "needle")
         self._create_file("notes.md", "needle")
+
+        content = await self._content({"pattern": "needle", "glob": "*.py"})
+
+        self.assertIn("main.py", content)
+        self.assertNotIn("notes.md", content)
+
+    async def test_slash_free_glob_matches_at_any_depth(self):
+        """gitignore semantics: '*.py' is not anchored to the search root."""
+        self._create_file("src/deep/main.py", "needle")
+        self._create_file("src/deep/notes.md", "needle")
 
         content = await self._content({"pattern": "needle", "glob": "*.py"})
 
@@ -322,14 +329,23 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
         self.assertIn("notes.md", content)
         self.assertNotIn("app.js", content)
 
-    async def test_type_filter(self):
-        self._create_file("main.py", "needle")
-        self._create_file("notes.md", "needle")
+    async def test_negated_glob_excludes(self):
+        self._create_file("app.js", "needle")
+        self._create_file("app.min.js", "needle")
 
-        content = await self._content({"pattern": "needle", "type": "py"})
+        content = await self._content({"pattern": "needle", "glob": "!*.min.js"})
+
+        self.assertIn("app.js", content)
+        self.assertNotIn("app.min.js", content)
+
+    async def test_directory_glob_covers_its_subtree(self):
+        self._create_file("src/main.py", "needle")
+        self._create_file("docs/readme.md", "needle")
+
+        content = await self._content({"pattern": "needle", "glob": "src/"})
 
         self.assertIn("main.py", content)
-        self.assertNotIn("notes.md", content)
+        self.assertNotIn("readme.md", content)
 
     # ---------------------------------------------------------
     # GROUP 4: OTHER OUTPUT MODES
@@ -339,7 +355,9 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
         self._create_file("src/main.py", "needle\nneedle\n")
         self._create_file("notes.md", "nothing")
 
-        result = await self._run({"pattern": "needle", "output_mode": "files_with_matches"})
+        result = await _grep_impl(
+            {"pattern": "needle", "output_mode": "files_with_matches"}, self.ctx
+        )
         content = unwrap(result)
 
         self.assertEqual(content, str(self.workspace / "src" / "main.py"))
@@ -362,13 +380,21 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
         self._create_file("main.py", "needle\nneedle\nother\n")
         self._create_file("notes.md", "needle\n")
 
-        result = await self._run({"pattern": "needle", "output_mode": "count"})
+        result = await _grep_impl({"pattern": "needle", "output_mode": "count"}, self.ctx)
         content = unwrap(result)
 
         self.assertIn(f"{self.workspace / 'main.py'}: 2", content)
         self.assertIn(f"{self.workspace / 'notes.md'}: 1", content)
         self.assertIn("Total: 3 matches in 2 files", content)
         self.assertEqual(result.ui_summary, "Found 3 matches in 2 files")
+
+    async def test_count_mode_counts_occurrences_not_lines(self):
+        """rg --count-matches counts every occurrence; so does this engine."""
+        self._create_file("main.py", "needle needle needle\n")
+
+        content = await self._content({"pattern": "needle", "output_mode": "count"})
+
+        self.assertIn("Total: 3 matches in 1 file", content)
 
     # ---------------------------------------------------------
     # GROUP 5: CAPS & TRUNCATION
@@ -377,7 +403,7 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
     async def test_head_limit_truncates_content(self):
         self._create_file("main.py", "needle\nneedle\nneedle\n")
 
-        result = await self._run({"pattern": "needle", "head_limit": 2})
+        result = await _grep_impl({"pattern": "needle", "head_limit": 2}, self.ctx)
         content = unwrap(result)
 
         self.assertEqual(content.count(":needle"), 2)
@@ -398,7 +424,9 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
         self._create_file("new.py", "needle")
         self._create_file("old.py", "needle", age_seconds=500)
 
-        result = await self._run({"pattern": "needle", "output_mode": "files_with_matches"})
+        result = await _grep_impl(
+            {"pattern": "needle", "output_mode": "files_with_matches"}, self.ctx
+        )
         content = unwrap(result)
 
         self.assertIn(str(self.workspace / "new.py"), content)
@@ -417,14 +445,43 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Total: 2 matches in 2 files", content)
 
     # ---------------------------------------------------------
-    # GROUP 6: IGNORE RULES (shared with Glob and ls)
+    # GROUP 6: SKIPPED FILES
+    # ---------------------------------------------------------
+
+    async def test_binary_files_are_skipped(self):
+        (self.workspace / "blob.bin").write_bytes(b"needle\x00\x01\x02needle")
+        self._create_file("main.py", "needle")
+
+        content = await self._content({"pattern": "needle"})
+
+        self.assertIn("main.py", content)
+        self.assertNotIn("blob.bin", content)
+
+    @patch("tools.grep_fallback.MAX_FILE_BYTES", 16)
+    async def test_oversized_files_are_skipped(self):
+        self._create_file("huge.py", "needle" + ("x" * 100))
+        self._create_file("main.py", "needle")
+
+        content = await self._content({"pattern": "needle"})
+
+        self.assertIn("main.py", content)
+        self.assertNotIn("huge.py", content)
+
+    async def test_undecodable_bytes_do_not_abort_the_search(self):
+        (self.workspace / "latin.txt").write_bytes(b"caf\xe9 needle\n")
+
+        content = await self._content({"pattern": "needle"})
+
+        self.assertIn("latin.txt", content)
+
+    # ---------------------------------------------------------
+    # GROUP 7: IGNORE RULES (shared with Glob and ls)
     # ---------------------------------------------------------
 
     async def test_builtin_ignores_are_applied(self):
         self._create_file("__pycache__/module.py", "needle")
         self._create_file("venv/lib/thing.py", "needle")
         self._create_file("node_modules/pkg/index.js", "needle")
-        self._create_file(".git/config", "needle")
         self._create_file("main.py", "needle")
 
         content = await self._content({"pattern": "needle"})
@@ -433,7 +490,6 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("__pycache__", content)
         self.assertNotIn("venv", content)
         self.assertNotIn("node_modules", content)
-        self.assertNotIn(".git", content)
 
     async def test_prismaignore_is_applied(self):
         (self.workspace / ".prismaignore").write_text("*.sqlite\nsecrets/\n", encoding="utf-8")
@@ -475,25 +531,8 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn(".env", content)
 
-    async def test_temporary_ignore_file_is_cleaned_up(self):
-        self._create_file("main.py", "needle")
-        created: list[str] = []
-        real_writer = grep._write_ignore_file
-
-        def spy(patterns):
-            path = real_writer(patterns)
-            created.append(path)
-            return path
-
-        with patch("tools.grep._write_ignore_file", side_effect=spy):
-            await self._content({"pattern": "needle"})
-
-        self.assertEqual(len(created), 1)
-        self.assertFalse(Path(created[0]).exists())
-
     @unittest.skipUnless(GIT, "git is not installed")
     async def test_gitignore_is_respected(self):
-        """Git-ignored files are invisible, exactly as they are to Glob and ls."""
         self._git("init")
 
         (self.workspace / ".gitignore").write_text("*.log\nbuild/\n", encoding="utf-8")
@@ -509,13 +548,7 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(GIT, "git is not installed")
     async def test_tracked_files_stay_searchable(self):
-        """A tracked file must be searchable even when .gitignore matches it.
-
-        ripgrep's native .gitignore handling hides those files, while git (and
-        so ls and Glob) keeps showing them. Searching through IgnoreMatcher's
-        export instead is what stops Grep from silently missing deliberately
-        committed files, such as a '.env.example' under '.env*'.
-        """
+        """Consulting IgnoreMatcher, not .gitignore, is what keeps these visible."""
         self._git("init")
 
         (self.workspace / ".gitignore").write_text("*.log\ndist/\n", encoding="utf-8")
@@ -533,88 +566,16 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("junk.bin", content)
 
     @unittest.skipUnless(GIT, "git is not installed")
-    async def test_filters_still_apply_to_tracked_gitignored_files(self):
-        """Resurrected files go through normal traversal, so glob still filters."""
-        self._git("init")
-
-        (self.workspace / ".gitignore").write_text("*.log\n", encoding="utf-8")
-        self._create_file("committed.log", "needle")
-        self._create_file("main.py", "needle")
-        self._git("add", "-f", "committed.log")
-
-        content = await self._content({"pattern": "needle", "glob": "*.py"})
-
-        self.assertIn("main.py", content)
-        self.assertNotIn("committed.log", content)
-
-    @unittest.skipUnless(GIT, "git is not installed")
-    async def test_gitignored_path_with_glob_characters_is_hidden(self):
-        """'[' is legal in a filename but is a character class in glob syntax."""
-        self._git("init")
-
-        (self.workspace / ".gitignore").write_text("*.log\n", encoding="utf-8")
-        self._create_file("weird[1].log", "needle")
-        self._create_file("main.py", "needle")
-
-        content = await self._content({"pattern": "needle"})
-
-        self.assertIn("main.py", content)
-        self.assertNotIn("weird[1].log", content)
-
-    # ---------------------------------------------------------
-    # GROUP 7: DEGRADED GIT
-    # ---------------------------------------------------------
-
-    def _break_git(self):
-        """Makes IgnoreMatcher's git query fail the way a missing binary would."""
-        return patch("tools.ignore.subprocess.run", side_effect=OSError("no git"))
-
-    @unittest.skipUnless(GIT, "git is not installed")
-    async def test_ripgrep_owns_gitignore_while_git_answers(self):
-        self._git("init")
-        self._create_file("main.py", "needle")
-
-        with patch("tools.grep._run_rg", return_value=("", False)) as run:
-            await self._run({"pattern": "needle"})
-
-        self.assertIn("--no-ignore-vcs", run.call_args[0][0])
-
-    @unittest.skipUnless(GIT, "git is not installed")
-    async def test_gitignore_falls_back_to_ripgrep_when_git_fails(self):
-        """Without git's verdict, our export cannot speak for .gitignore.
-
-        Keeping --no-ignore-vcs here would mean no .gitignore filtering at all,
-        which is how a search ends up walking node_modules.
-        """
-        self._git("init")
-        self._create_file("main.py", "needle")
-
-        with self._break_git():
-            with patch("tools.grep._run_rg", return_value=("", False)) as run:
-                await self._run({"pattern": "needle"})
-
-        self.assertNotIn("--no-ignore-vcs", run.call_args[0][0])
-
-    @unittest.skipUnless(GIT, "git is not installed")
     async def test_degraded_git_is_reported_once(self):
         self._git("init")
         self._create_file("main.py", "needle")
 
-        with self._break_git():
+        with patch("tools.ignore.subprocess.run", side_effect=OSError("no git")):
             first = await self._content({"pattern": "needle"})
             second = await self._content({"pattern": "needle"})
 
         self.assertIn("git could not be consulted", first)
         self.assertNotIn("git could not be consulted", second)
-
-    @unittest.skipUnless(GIT, "git is not installed")
-    async def test_healthy_git_adds_no_caveat(self):
-        self._git("init")
-        self._create_file("main.py", "needle")
-
-        content = await self._content({"pattern": "needle"})
-
-        self.assertNotIn("git could not be consulted", content)
 
     # ---------------------------------------------------------
     # GROUP 8: REGISTRATION
@@ -623,7 +584,7 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
     def test_registry_binding(self):
         mock_registry = MagicMock()
 
-        register_grep_tools(mock_registry, self.ctx, RG)
+        register_fallback_grep_tools(mock_registry, self.ctx)
 
         mock_registry.register.assert_called_once()
         call_kwargs = mock_registry.register.call_args[1]
@@ -633,31 +594,25 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
         # Grep must survive clone_readonly() so PLAN mode can still search.
         self.assertTrue(call_kwargs["is_readonly"])
 
-    def test_ripgrep_backend_is_chosen_when_available(self):
-        registry = MagicMock()
-        ctx = dataclasses.replace(self.ctx, capabilities=Capabilities(ripgrep=RG))
+    def test_schema_omits_unsupported_filters(self):
+        """`type` needs ripgrep's type table, so it is not offered here."""
+        mock_registry = MagicMock()
 
-        with patch("tools.core.register_grep_tools") as rg_backend, \
-             patch("tools.core.register_fallback_grep_tools") as fallback:
-            register_grep_backend(registry, ctx)
+        register_fallback_grep_tools(mock_registry, self.ctx)
+        properties = mock_registry.register.call_args[1]["input_schema"]["properties"]
 
-        rg_backend.assert_called_once_with(registry, ctx, RG)
-        fallback.assert_not_called()
+        self.assertNotIn("type", properties)
+        self.assertIn("glob", properties)
 
-    def test_fallback_backend_is_chosen_without_ripgrep(self):
-        """There is always a Grep tool; only the engine behind it changes."""
-        registry = MagicMock()
-        ctx = dataclasses.replace(
-            self.ctx,
-            capabilities=Capabilities(ripgrep=None, git_status=GitStatus.UNUSED),
-        )
+    def test_description_does_not_mention_the_missing_engine(self):
+        """The model is told what this tool does, not what the machine lacks."""
+        mock_registry = MagicMock()
 
-        with patch("tools.core.register_grep_tools") as rg_backend, \
-             patch("tools.core.register_fallback_grep_tools") as fallback:
-            register_grep_backend(registry, ctx)
+        register_fallback_grep_tools(mock_registry, self.ctx)
+        description = mock_registry.register.call_args[1]["description"]
 
-        fallback.assert_called_once_with(registry, ctx)
-        rg_backend.assert_not_called()
+        self.assertNotIn("ripgrep", description.lower())
+        self.assertNotIn("fallback", description.lower())
 
 
 if __name__ == "__main__":

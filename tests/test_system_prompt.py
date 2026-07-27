@@ -6,9 +6,12 @@ import logging
 from pathlib import Path
 from unittest.mock import patch
 
+from capabilities import Capabilities
 from config import load_app_config
+from environment import get_environment_details
 from prompts import build_system_prompt, _DEFAULT_USER_INSTRUCTIONS, _load_core_instructions
 from sessioncontext import InvocationContext
+from tools.ignore import GitStatus
 
 
 class MockArgs:
@@ -222,6 +225,73 @@ class TestSystemPromptBuilder(unittest.TestCase):
         self.assertEqual(parts[2], "Global Config Layer")
         self.assertEqual(parts[3], "Project Config Layer")
         self.assertEqual(parts[4], "<mocked_env>")
+
+
+class TestEnvironmentCapabilityWarnings(unittest.TestCase):
+    """
+    The environment block must not overstate what the tools can see.
+
+    Reporting a plain 'Git repo: Yes' while git is unusable is worse than
+    silence: it invites the agent to trust listings that quietly include build
+    output and caches.
+    """
+
+    def _context(self, capabilities) -> InvocationContext:
+        return InvocationContext(
+            workspace=Path("/repo"),
+            cwd=Path("/repo"),
+            workspace_is_git_repo=True,
+            resume_file=None,
+            capabilities=capabilities,
+        )
+
+    def test_healthy_environment_says_nothing_extra(self):
+        details = get_environment_details(
+            self._context(Capabilities(ripgrep="/usr/bin/rg", git_status=GitStatus.OK))
+        )
+
+        self.assertIn("Workspace root is a Git repo: Yes", details)
+        self.assertNotIn("WARNING", details)
+
+    def test_unprobed_context_says_nothing_extra(self):
+        details = get_environment_details(self._context(None))
+
+        self.assertIn("Workspace root is a Git repo: Yes", details)
+        self.assertNotIn("WARNING", details)
+
+    def test_degraded_git_is_flagged(self):
+        details = get_environment_details(
+            self._context(
+                Capabilities(git_status=GitStatus.UNAVAILABLE, git_error="no git")
+            )
+        )
+
+        self.assertIn("WARNING", details)
+        self.assertIn(".gitignore", details)
+
+    def test_missing_ripgrep_is_not_mentioned(self):
+        """Which engine backs Grep is the tool's business, not the prompt's."""
+        details = get_environment_details(
+            self._context(Capabilities(ripgrep=None, git_status=GitStatus.OK))
+        )
+
+        self.assertNotIn("ripgrep", details.lower())
+        self.assertNotIn("WARNING", details)
+
+    def test_warning_does_not_break_the_block_layout(self):
+        """The warning is interpolated into an indented block before dedent().
+
+        An unindented continuation line would flatten the common prefix and
+        leave the whole environment block indented.
+        """
+        details = get_environment_details(
+            self._context(
+                Capabilities(git_status=GitStatus.FAILED, git_error="fatal: refused")
+            )
+        )
+
+        self.assertIn("\n<workspace>\n", details)
+        self.assertIn("\nOS: ", details)
 
 
 if __name__ == "__main__":

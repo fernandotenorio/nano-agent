@@ -9,6 +9,7 @@ from pathlib import Path
 from datetime import datetime
 import logging
 
+from capabilities import probe_capabilities, user_warnings
 from config import AppConfig, load_app_config
 from prompts import build_system_prompt
 from sessioncontext import InvocationContext, AgentPolicy, AgentMode
@@ -22,7 +23,13 @@ from typedefs import (
 from adapter import acompletion
 from dotenv import load_dotenv
 from transcript import Transcript
-from hooks import HookManager, initial_setup_hook, agent_mode_hook, shell_confirmation_hook
+from hooks import (
+    HookManager,
+    agent_mode_hook,
+    capabilities_hook,
+    initial_setup_hook,
+    shell_confirmation_hook,
+)
 from filestate import file_changes_hook
 from tools.registry import ToolRegistry
 from tools.core import create_core_registry
@@ -466,12 +473,17 @@ async def main():
     # Creates transcripts folder if it does not exists
     transcript_file = get_transcript_path(app_config, cwd, args.resume, ui=ui)
 
+    # Probe the environment once. This decides which Grep engine gets
+    # registered below, and what the startup banner and system prompt warn about.
+    capabilities = probe_capabilities(root_dir)
+
     # 1. Create the context
     ctx = InvocationContext(
         workspace=root_dir,
         cwd=cwd,
         workspace_is_git_repo = (root_dir / ".git").exists(),
-        resume_file=Path(args.resume) if args.resume else None
+        resume_file=Path(args.resume) if args.resume else None,
+        capabilities=capabilities,
     )
     
     # Initialize State
@@ -484,10 +496,12 @@ async def main():
     
     # Bind and register the built-in hooks
     bound_setup_hook = partial(initial_setup_hook, app_config=app_config, root=root_dir, cwd=cwd)
+    bound_capabilities_hook = partial(capabilities_hook, capabilities=capabilities)
     bound_mode_hook = partial(agent_mode_hook, policy=policy)
     bound_file_changes_hook = partial(file_changes_hook, ctx=ctx)
 
     hooks.register_user_prompt(bound_setup_hook)
+    hooks.register_user_prompt(bound_capabilities_hook)
     hooks.register_user_prompt(bound_mode_hook)
     hooks.register_user_prompt(bound_file_changes_hook)
 
@@ -509,6 +523,7 @@ async def main():
         cwd=cwd,
         transcript_path=transcript_file,
         git_branch=read_git_branch(root_dir) if ctx.workspace_is_git_repo else None,
+        warnings=tuple(user_warnings(capabilities)),
     ))
     
     while True:

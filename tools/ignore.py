@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from enum import Enum
 from pathlib import Path
 from typing import Iterable
 
@@ -34,6 +35,26 @@ BUILTIN_IGNORE_PATTERNS = (
 # (fully ignored directories are collapsed), but we must never hang a tool.
 GIT_QUERY_TIMEOUT: float = 5.0
 
+
+class GitStatus(Enum):
+    """Outcome of the git query, so callers can tell 'nothing to ignore' from
+    'we never found out'.
+
+    The matcher fails open on error, which silently widens what every search
+    tool can see. Recording *why* is what lets the session warn about it
+    instead of quietly listing build output.
+    """
+
+    UNUSED = "unused"            # not a repo, or git was switched off
+    OK = "ok"                    # git answered
+    UNAVAILABLE = "unavailable"  # no usable git binary
+    FAILED = "failed"            # git ran and refused, or timed out
+
+    @property
+    def degraded(self) -> bool:
+        """True when git should have answered but did not."""
+        return self in (GitStatus.UNAVAILABLE, GitStatus.FAILED)
+
 #
 # Neutralizes the glob metacharacters that can appear in a real filename.
 #
@@ -47,6 +68,16 @@ _GLOB_METACHARACTERS = {
     "?": "[?]",
     "[": "[[]",
 }
+
+
+def _first_line(raw: bytes) -> str:
+    """Extracts the first non-empty line of a captured stream, for error text."""
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+
+    return ""
 
 
 def as_literal_pattern(relative_path: str) -> str:
@@ -79,6 +110,10 @@ class IgnoreMatcher:
     as a union: git's verdict cannot be negated by a '!' rule.
 
     Pattern syntax follows Git's gitignore specification.
+
+    When source 4 cannot be consulted the matcher still works, but it sees less
+    than it should. `git_status` reports that, and callers are expected to pass
+    it on rather than let a workspace quietly widen.
     """
 
     def __init__(
@@ -111,6 +146,9 @@ class IgnoreMatcher:
         # prefixes (a collapsed 'build/' entry stands for its whole subtree).
         self._git_files: frozenset[str] = frozenset()
         self._git_dirs: tuple[str, ...] = ()
+
+        self.git_status: GitStatus = GitStatus.UNUSED
+        self.git_error: str = ""
 
         if use_git and self._in_git_repo():
             self._git_files, self._git_dirs = self._load_git_ignored()
@@ -195,14 +233,18 @@ class IgnoreMatcher:
 
     def _in_git_repo(self) -> bool:
         """
-        Returns True if the workspace, or any ancestor, holds a .git entry.
+        Returns True if the workspace, or any ancestor, looks like a git repo.
 
         Cheap pre-check that keeps the subprocess out of non-repo workspaces.
-        '.git' can be a file (worktrees, submodules), hence exists() and not
-        is_dir().
+        A '.git' *file* means a worktree or submodule; a '.git' directory has to
+        hold a HEAD to count. Requiring HEAD matters because an empty '.git'
+        folder is not a repository: without this check we would run git, watch
+        it fail, and then warn about .gitignore rules that never existed.
         """
         for directory in (self.workspace, *self.workspace.parents):
-            if (directory / ".git").exists():
+            marker = directory / ".git"
+
+            if marker.is_file() or (marker / "HEAD").exists():
                 return True
 
         return False
@@ -219,7 +261,8 @@ class IgnoreMatcher:
 
         Fails open (empty result) on every error: hiding files is a
         convenience, so a missing or unhappy git must never blank out a
-        workspace.
+        workspace. Every failure is recorded in `git_status` so the session can
+        say so out loud.
         """
         try:
             completed = subprocess.run(
@@ -235,11 +278,28 @@ class IgnoreMatcher:
                 capture_output=True,
                 timeout=GIT_QUERY_TIMEOUT,
             )
-        except (OSError, subprocess.SubprocessError):
+        except OSError as e:
+            # No runnable git binary at all.
+            self.git_status = GitStatus.UNAVAILABLE
+            self.git_error = str(e)
+            return frozenset(), ()
+        except subprocess.SubprocessError as e:
+            # Ran, but we could not collect an answer (typically a timeout).
+            self.git_status = GitStatus.FAILED
+            self.git_error = str(e) or e.__class__.__name__
             return frozenset(), ()
 
         if completed.returncode != 0:
+            # git ran and refused. 'detected dubious ownership' lands here, and
+            # is by far the most common way this fails on a real machine, so
+            # the reason is worth keeping.
+            self.git_status = GitStatus.FAILED
+            self.git_error = _first_line(completed.stderr) or (
+                f"git ls-files exited with code {completed.returncode}"
+            )
             return frozenset(), ()
+
+        self.git_status = GitStatus.OK
 
         # Paths arrive relative to the queried directory (the workspace root),
         # which is exactly the form ignores_relative matches against.
