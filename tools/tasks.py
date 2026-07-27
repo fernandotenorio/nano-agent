@@ -33,7 +33,7 @@ _SUB_AGENTS = [
             You cannot modify files or run commands; review by reading the code."""),
         # Genuinely read-only: no Shell. A shell would grant the same
         # destructive power as the main agent, making the label meaningless.
-        tools=["Read", "Glob", "ls"]
+        tools=["Read", "Glob", "Grep", "ls"]
     )
 ]
 

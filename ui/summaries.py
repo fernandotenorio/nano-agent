@@ -45,6 +45,11 @@ def summarize_call(name: str, args: Any) -> str:
         path = args.get("path")
         return f"Glob({pattern}, {_short(path, 40)})" if path else f"Glob({pattern})"
 
+    if name == "Grep":
+        pattern = _short(args.get("pattern", "?"), 40)
+        scope = args.get("path") or args.get("glob") or args.get("type")
+        return f"Grep({pattern}, {_short(scope, 40)})" if scope else f"Grep({pattern})"
+
     if name == "ls":
         return f"ls({_short(args.get('path', '.'), 40)})"
 

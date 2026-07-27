@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Iterable
 
@@ -29,16 +30,25 @@ BUILTIN_IGNORE_PATTERNS = (
     ".prisma/"
 )
 
+# Upper bound for the `git ls-files` query. Git is fast even on large repos
+# (fully ignored directories are collapsed), but we must never hang a tool.
+GIT_QUERY_TIMEOUT: float = 5.0
+
 
 class IgnoreMatcher:
     """
     Determines whether workspace-relative paths should be ignored.
 
-    Ignore sources (lowest precedence first):
+    Ignore sources:
 
         1. Built-in patterns
         2. <workspace>/.prismaignore
         3. Runtime exclude patterns
+        4. Paths git already ignores (asked, never parsed)
+
+    Sources 1-3 are gitignore-syntax patterns and follow Git's precedence
+    rules among themselves. Source 4 is a set of concrete paths and is applied
+    as a union: git's verdict cannot be negated by a '!' rule.
 
     Pattern syntax follows Git's gitignore specification.
     """
@@ -47,6 +57,7 @@ class IgnoreMatcher:
         self,
         workspace: Path,
         extra_patterns: Iterable[str] | None = None,
+        use_git: bool = True,
     ) -> None:
 
         self.workspace = workspace.resolve()
@@ -61,10 +72,20 @@ class IgnoreMatcher:
                 if isinstance(p, str) and p.strip()
             )
 
+        self._patterns = patterns
+
         self._spec = pathspec.PathSpec.from_lines(
             "gitignore",
             patterns,
         )
+
+        # Concrete paths git ignores: files as exact matches, directories as
+        # prefixes (a collapsed 'build/' entry stands for its whole subtree).
+        self._git_files: frozenset[str] = frozenset()
+        self._git_dirs: tuple[str, ...] = ()
+
+        if use_git and self._in_git_repo():
+            self._git_files, self._git_dirs = self._load_git_ignored()
 
     def ignores(self, path: Path, *, is_dir: bool) -> bool:
         """
@@ -108,7 +129,94 @@ class IgnoreMatcher:
         if is_dir and normalized and not normalized.endswith("/"):
             normalized += "/"
 
-        return self._spec.match_file(normalized)
+        return self._spec.match_file(normalized) or self._git_ignores(normalized)
+
+    def export_patterns(self) -> list[str]:
+        """
+        Returns the gitignore-syntax patterns backing this matcher: built-ins,
+        .prismaignore, and runtime excludes.
+
+        Git's own answers are deliberately excluded. This export exists to hand
+        Prisma's rules to external tools that already speak gitignore (ripgrep's
+        --ignore-file), and those tools apply .gitignore themselves.
+        """
+        return list(self._patterns)
+
+    def _git_ignores(self, normalized: str) -> bool:
+        """
+        Returns True if git reported this workspace-relative path as ignored.
+
+        Directory entries stand for their entire subtree, so children are
+        matched by prefix even when traversal never pruned the parent.
+        """
+        if normalized in self._git_files:
+            return True
+
+        return bool(self._git_dirs) and normalized.startswith(self._git_dirs)
+
+    def _in_git_repo(self) -> bool:
+        """
+        Returns True if the workspace, or any ancestor, holds a .git entry.
+
+        Cheap pre-check that keeps the subprocess out of non-repo workspaces.
+        '.git' can be a file (worktrees, submodules), hence exists() and not
+        is_dir().
+        """
+        for directory in (self.workspace, *self.workspace.parents):
+            if (directory / ".git").exists():
+                return True
+
+        return False
+
+    def _load_git_ignored(self) -> tuple[frozenset[str], tuple[str, ...]]:
+        """
+        Asks git which paths it currently ignores.
+
+        We ask rather than parse: reimplementing gitignore precedence (nested
+        ignore files, .git/info/exclude, the global config, negations) would be
+        a bug farm. Only *untracked* ignored paths are reported, which is the
+        behaviour we want — a tracked file stays visible even if a pattern
+        would otherwise match it, exactly as git itself shows it.
+
+        Fails open (empty result) on every error: hiding files is a
+        convenience, so a missing or unhappy git must never blank out a
+        workspace.
+        """
+        try:
+            completed = subprocess.run(
+                [
+                    "git", "ls-files",
+                    "--others",            # untracked paths...
+                    "--ignored",           # ...that are ignored
+                    "--exclude-standard",  # honour every standard exclude source
+                    "--directory",         # collapse fully ignored directories
+                    "-z",                  # NUL-separated: never quoted or escaped
+                ],
+                cwd=self.workspace,
+                capture_output=True,
+                timeout=GIT_QUERY_TIMEOUT,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return frozenset(), ()
+
+        if completed.returncode != 0:
+            return frozenset(), ()
+
+        # Paths arrive relative to the queried directory (the workspace root),
+        # which is exactly the form ignores_relative matches against.
+        files: set[str] = set()
+        dirs: list[str] = []
+
+        for entry in completed.stdout.decode("utf-8", errors="replace").split("\0"):
+            if not entry:
+                continue
+
+            if entry.endswith("/"):
+                dirs.append(entry)
+            else:
+                files.add(entry)
+
+        return frozenset(files), tuple(dirs)
 
     def _load_prismaignore(self) -> list[str]:
         """
