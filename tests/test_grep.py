@@ -56,6 +56,9 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
 
         return path
 
+    def _git(self, *args: str) -> None:
+        subprocess.run([GIT, *args], cwd=self.workspace, capture_output=True, check=True)
+
     async def _content(self, kwargs: dict) -> str:
         """Runs Grep and returns the LLM-facing content, asserting success."""
         result = await _grep_impl(kwargs, self.ctx)
@@ -492,17 +495,73 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(GIT, "git is not installed")
     async def test_gitignore_is_respected(self):
-        """ripgrep applies .gitignore natively; we only add Prisma's own rules."""
-        subprocess.run([GIT, "init"], cwd=self.workspace, capture_output=True, check=True)
+        """Git-ignored files are invisible, exactly as they are to Glob and ls."""
+        self._git("init")
 
-        (self.workspace / ".gitignore").write_text("*.log\n", encoding="utf-8")
-        self._create_file("app.log", "needle")
+        (self.workspace / ".gitignore").write_text("*.log\nbuild/\n", encoding="utf-8")
+        self._create_file("scratch.log", "needle")
+        self._create_file("build/output.bin", "needle")
         self._create_file("main.py", "needle")
 
         content = await self._content({"pattern": "needle"})
 
         self.assertIn("main.py", content)
-        self.assertNotIn("app.log", content)
+        self.assertNotIn("scratch.log", content)
+        self.assertNotIn("output.bin", content)
+
+    @unittest.skipUnless(GIT, "git is not installed")
+    async def test_tracked_files_stay_searchable(self):
+        """A tracked file must be searchable even when .gitignore matches it.
+
+        ripgrep's native .gitignore handling hides those files, while git (and
+        so ls and Glob) keeps showing them. Searching through IgnoreMatcher's
+        export instead is what stops Grep from silently missing deliberately
+        committed files, such as a '.env.example' under '.env*'.
+        """
+        self._git("init")
+
+        (self.workspace / ".gitignore").write_text("*.log\ndist/\n", encoding="utf-8")
+        self._create_file("scratch.log", "needle")
+        self._create_file("committed.log", "needle")
+        self._create_file("dist/keep.txt", "needle")
+        self._create_file("dist/junk.bin", "needle")
+        self._git("add", "-f", "committed.log", "dist/keep.txt")
+
+        content = await self._content({"pattern": "needle"})
+
+        self.assertIn("committed.log", content)
+        self.assertIn("keep.txt", content)
+        self.assertNotIn("scratch.log", content)
+        self.assertNotIn("junk.bin", content)
+
+    @unittest.skipUnless(GIT, "git is not installed")
+    async def test_filters_still_apply_to_tracked_gitignored_files(self):
+        """Resurrected files go through normal traversal, so glob still filters."""
+        self._git("init")
+
+        (self.workspace / ".gitignore").write_text("*.log\n", encoding="utf-8")
+        self._create_file("committed.log", "needle")
+        self._create_file("main.py", "needle")
+        self._git("add", "-f", "committed.log")
+
+        content = await self._content({"pattern": "needle", "glob": "*.py"})
+
+        self.assertIn("main.py", content)
+        self.assertNotIn("committed.log", content)
+
+    @unittest.skipUnless(GIT, "git is not installed")
+    async def test_gitignored_path_with_glob_characters_is_hidden(self):
+        """'[' is legal in a filename but is a character class in glob syntax."""
+        self._git("init")
+
+        (self.workspace / ".gitignore").write_text("*.log\n", encoding="utf-8")
+        self._create_file("weird[1].log", "needle")
+        self._create_file("main.py", "needle")
+
+        content = await self._content({"pattern": "needle"})
+
+        self.assertIn("main.py", content)
+        self.assertNotIn("weird[1].log", content)
 
     # ---------------------------------------------------------
     # GROUP 7: REGISTRATION

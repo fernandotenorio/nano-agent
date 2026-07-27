@@ -164,18 +164,34 @@ class TestGitIgnoreIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(matcher.ignores_relative("runtime", is_dir=True))
         self.assertFalse(matcher.ignores_relative("main.py", is_dir=False))
 
-    def test_export_patterns_excludes_git_paths(self):
-        """The ripgrep export carries our rules only; rg reads .gitignore itself."""
-        self._gitignore("*.log")
-        self._write("app.log")
+    def test_export_patterns_carries_every_source(self):
+        """The ripgrep export must reproduce what Glob and ls already see."""
+        self._gitignore("*.log", "build/")
+        self._write("untracked.log")
+        self._write("committed.log")
+        self._write("build/output.bin")
+        self._git("add", "-f", "committed.log")
         (self.workspace / ".prismaignore").write_text("*.sqlite\n", encoding="utf-8")
 
         patterns = IgnoreMatcher(self.workspace, extra_patterns=["runtime/"]).export_patterns()
 
-        self.assertIn("*.sqlite", patterns)
-        self.assertIn("runtime/", patterns)
-        self.assertIn("node_modules/", patterns)  # a built-in
-        self.assertNotIn("app.log", patterns)
+        self.assertIn("*.sqlite", patterns)          # .prismaignore
+        self.assertIn("runtime/", patterns)          # runtime exclude
+        self.assertIn("node_modules/", patterns)     # built-in
+        self.assertIn("/untracked.log", patterns)    # git's answer, anchored
+        self.assertIn("/build/", patterns)           # collapsed directory
+
+        # Tracked files are searchable, so they must not reach the export.
+        self.assertNotIn("/committed.log", patterns)
+
+    def test_export_escapes_glob_metacharacters(self):
+        """Exported paths are literals: '[1]' must not become a character class."""
+        self._gitignore("*.log")
+        self._write("weird[1].log")
+
+        patterns = IgnoreMatcher(self.workspace).export_patterns()
+
+        self.assertIn("/weird[[]1].log", patterns)
 
     # ---------------------------------------------------------
     # GROUP 3: ls and Glob inherit the behaviour for free

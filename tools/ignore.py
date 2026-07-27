@@ -34,6 +34,34 @@ BUILTIN_IGNORE_PATTERNS = (
 # (fully ignored directories are collapsed), but we must never hang a tool.
 GIT_QUERY_TIMEOUT: float = 5.0
 
+#
+# Neutralizes the glob metacharacters that can appear in a real filename.
+#
+# Bracket expressions are used rather than backslash escapes because a
+# backslash is not an escape character in gitignore globs on Windows (it is a
+# path separator), so '\[' would silently fail to match there. ']' needs no
+# escape: with every '[' neutralized, no character class is ever open.
+#
+_GLOB_METACHARACTERS = {
+    "*": "[*]",
+    "?": "[?]",
+    "[": "[[]",
+}
+
+
+def as_literal_pattern(relative_path: str) -> str:
+    """
+    Converts a workspace-relative path into a gitignore pattern matching only
+    that exact path.
+
+    The leading '/' anchors the pattern to the workspace root, which also
+    sidesteps gitignore's line-level syntax: a pattern starting with '/' can
+    never be read as a '#' comment or a '!' negation.
+    """
+    escaped = "".join(_GLOB_METACHARACTERS.get(char, char) for char in relative_path)
+
+    return f"/{escaped}"
+
 
 class IgnoreMatcher:
     """
@@ -133,14 +161,25 @@ class IgnoreMatcher:
 
     def export_patterns(self) -> list[str]:
         """
-        Returns the gitignore-syntax patterns backing this matcher: built-ins,
-        .prismaignore, and runtime excludes.
+        Returns this matcher's full verdict as gitignore-syntax patterns:
+        built-ins, .prismaignore, runtime excludes, and git's answers rendered
+        as anchored literal paths.
 
-        Git's own answers are deliberately excluded. This export exists to hand
-        Prisma's rules to external tools that already speak gitignore (ripgrep's
-        --ignore-file), and those tools apply .gitignore themselves.
+        This exists so an external tool that already speaks gitignore (ripgrep's
+        --ignore-file) can reproduce exactly what Glob and ls see. Exporting
+        git's paths rather than letting the tool read .gitignore itself is what
+        keeps the two views identical: git reports only *untracked* ignored
+        paths, so a tracked file that happens to match a pattern stays
+        searchable, just as it stays listable.
+
+        Git paths are appended last, mirroring the union semantics of
+        ignores_relative: a '!' rule cannot bring them back.
         """
-        return list(self._patterns)
+        return [
+            *self._patterns,
+            *(as_literal_pattern(path) for path in sorted(self._git_files)),
+            *(as_literal_pattern(path) for path in self._git_dirs),
+        ]
 
     def _git_ignores(self, normalized: str) -> bool:
         """

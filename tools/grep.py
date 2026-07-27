@@ -13,10 +13,14 @@ Two invariants shape the implementation:
      addressed relatively. That also keeps output free of drive letters,
      whose ':' would be ambiguous when parsing 'path:line:text'.
 
-  2. Prisma's own ignore rules (built-ins, .prismaignore, runtime excludes)
-     are exported from IgnoreMatcher into a temporary gitignore-formatted
-     file and handed to `rg --ignore-file`, so Grep, Glob, and ls agree on
-     what is invisible. .gitignore itself is left to ripgrep.
+  2. IgnoreMatcher is the single source of truth for what is invisible. Its
+     rules are exported into a temporary gitignore-formatted file and handed
+     to `rg --ignore-file`, while ripgrep's own VCS handling is switched off.
+     Letting ripgrep read .gitignore directly looks simpler but drifts from
+     Glob and ls: ripgrep hides every path matching a pattern, whereas git
+     (and therefore IgnoreMatcher) keeps tracked files visible. That drift
+     would make Grep silently miss deliberately committed files such as a
+     `.env.example` under `.env*`, or a checked-in `dist/` bundle.
 """
 
 from __future__ import annotations
@@ -141,6 +145,7 @@ def _build_rg_args(
         "--crlf",                # so '^' and '$' anchor correctly on CRLF files
         "--no-messages",         # unreadable files are not the model's problem
         "--hidden",              # dotfiles are searchable, like Glob's DOTGLOB
+        "--no-ignore-vcs",       # .gitignore reaches us through --ignore-file
         "--with-filename",       # rg omits it for single-file searches
         "--no-heading",          # one self-describing record per line
         "--null",                # 'path\0...': unambiguous on every platform
@@ -419,12 +424,11 @@ async def _grep_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
     workspace = ctx.workspace.resolve()
     relative_target = target.relative_to(workspace).as_posix()
 
-    # Only our own rules are exported: ripgrep applies .gitignore itself, so
-    # asking git here would be duplicated work.
+    # The same matcher Glob and ls build, exported wholesale so all three tools
+    # search and list exactly the same set of files.
     matcher = IgnoreMatcher(
         workspace=workspace,
         extra_patterns=_as_str_list(kwargs.get("exclude")),
-        use_git=False,
     )
 
     try:
