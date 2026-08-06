@@ -1,13 +1,22 @@
 # ui/rich_ui.py
 """
-Rich-powered terminal UI. The ONLY module in the project that imports `rich`.
+Rich-powered scrolling terminal UI: the fallback front-end (`--ui rich`),
+useful wherever a full-screen application is a poor fit (redirected output,
+CI, a terminal Textual cannot drive).
+
+The ONLY module in the project that imports `rich`.
+
+Rendering is synchronous and fast, so it happens inline. Prompts block on
+stdin, so they are pushed onto a worker thread: blocking the event loop would
+stall the agent's own subprocesses and network calls.
 """
 
 from __future__ import annotations
 
+import asyncio
 import time
-from contextlib import contextmanager
-from typing import Iterator
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
 from rich import box
 from rich.console import Console
@@ -18,7 +27,15 @@ from rich.prompt import Prompt
 from rich.status import Status
 from rich.text import Text
 
-from ui.base import UI, PlanDecision, SessionInfo, ShellDecision
+from ui.base import (
+    UI,
+    PlanDecision,
+    SessionInfo,
+    SessionRunner,
+    ShellDecision,
+    ToolCallView,
+    UsageInfo,
+)
 from ui.null_ui import QuietUI
 
 
@@ -59,9 +76,14 @@ class RichUI(UI):
         except (UnicodeEncodeError, LookupError):
             return False
 
+    # --- Lifecycle ----------------------------------------------------------
+
+    async def run(self, session: SessionRunner) -> None:
+        await session()
+
     # --- Passive rendering -------------------------------------------------
 
-    def session_start(self, info: SessionInfo) -> None:
+    async def session_start(self, info: SessionInfo) -> None:
         c = self._console
         c.print()
         c.print(
@@ -81,19 +103,19 @@ class RichUI(UI):
 
         c.rule(characters=self._rule_char, style="dim")
 
-    def mode_changed(self, mode: str) -> None:
+    async def mode_changed(self, mode: str) -> None:
         self._console.print(f"[bold magenta]Switched to {escape(mode)} mode[/bold magenta]")
 
-    def thinking(self, text: str, duration_s: float | None = None) -> None:
+    async def thinking(self, text: str, duration_s: float | None = None) -> None:
         suffix = f" for {duration_s:.1f}s" if duration_s is not None else "..."
         self._console.print(f"[dim italic]{self._thought} Thought{suffix}[/dim italic]")
 
-    def assistant_text(self, text: str) -> None:
+    async def assistant_text(self, text: str) -> None:
         self._console.print()
         self._console.print(Markdown(text))
 
-    @contextmanager
-    def tool_status(self, summary: str) -> Iterator[None]:
+    @asynccontextmanager
+    async def tool_status(self, summary: str) -> AsyncIterator[None]:
         if self._active_status is not None:
             # A live display is already running (e.g. a sub-agent spinner):
             # rich forbids nesting, so inner statuses become no-ops.
@@ -109,21 +131,29 @@ class RichUI(UI):
             status.stop()
             self._active_status = None
 
-    def tool_result(self, summary: str, is_error: bool = False) -> None:
-        if is_error:
-            self._console.print(f"  [red]{self._cross}[/red] [red]{escape(summary)}[/red]")
+    async def tool_result(self, call: ToolCallView) -> None:
+        if call.is_error:
+            self._console.print(f"  [red]{self._cross}[/red] [red]{escape(call.summary)}[/red]")
         else:
-            self._console.print(f"  [green]{self._check}[/green] [dim]{escape(summary)}[/dim]")
+            self._console.print(f"  [green]{self._check}[/green] [dim]{escape(call.summary)}[/dim]")
 
-    def notice(self, text: str) -> None:
+    async def usage(self, info: UsageInfo) -> None:
+        # A scrolling log has no status bar to park a running total in, and a
+        # token count after every response would drown out the conversation.
+        pass
+
+    async def notice(self, text: str) -> None:
         self._console.print(f"[dim]{escape(text)}[/dim]")
 
-    def error(self, text: str) -> None:
+    async def error(self, text: str) -> None:
         self._console.print(f"[bold red]{escape(text)}[/bold red]")
 
     # --- Interactive prompts ----------------------------------------------
 
-    def confirm_shell(self, command: str, description: str | None = None) -> ShellDecision:
+    async def confirm_shell(self, command: str, description: str | None = None) -> ShellDecision:
+        return await asyncio.to_thread(self._confirm_shell_blocking, command, description)
+
+    def _confirm_shell_blocking(self, command: str, description: str | None) -> ShellDecision:
         self._pause_status()
         try:
             body = Text()
@@ -159,7 +189,10 @@ class RichUI(UI):
         finally:
             self._resume_status()
 
-    def approve_plan(self, plan_summary: str) -> PlanDecision:
+    async def approve_plan(self, plan_summary: str) -> PlanDecision:
+        return await asyncio.to_thread(self._approve_plan_blocking, plan_summary)
+
+    def _approve_plan_blocking(self, plan_summary: str) -> PlanDecision:
         self._pause_status()
         try:
             self._console.print()
@@ -195,8 +228,8 @@ class RichUI(UI):
         finally:
             self._resume_status()
 
-    def read_user_input(self) -> str:
-        return self._console.input("\n[bold cyan]>[/bold cyan] ")
+    async def read_user_input(self) -> str:
+        return await asyncio.to_thread(self._console.input, "\n[bold cyan]>[/bold cyan] ")
 
     # --- Composition --------------------------------------------------------
 

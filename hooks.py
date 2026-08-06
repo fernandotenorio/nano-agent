@@ -101,7 +101,7 @@ async def shell_confirmation_hook(event: PreToolUseEvent, ui: UI | None = None) 
     command = str(event.tool_input.get("command", "")).strip()
     description = event.tool_input.get("description")
 
-    decision = (ui or NullUI()).confirm_shell(command, description)
+    decision = await (ui or NullUI()).confirm_shell(command, description)
 
     if decision.approved:
         return event

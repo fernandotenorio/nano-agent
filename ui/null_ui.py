@@ -11,46 +11,61 @@ Non-rendering UI implementations.
 
 from __future__ import annotations
 
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractAsyncContextManager, nullcontext
 
-from ui.base import UI, PlanDecision, SessionInfo, ShellDecision
+from ui.base import (
+    UI,
+    PlanDecision,
+    SessionInfo,
+    SessionRunner,
+    ShellDecision,
+    ToolCallView,
+    UsageInfo,
+)
 
 
 class NullUI(UI):
     """A UI that renders nothing and denies all interactive requests."""
 
-    def session_start(self, info: SessionInfo) -> None:
+    async def run(self, session: SessionRunner) -> None:
+        await session()
+
+    async def session_start(self, info: SessionInfo) -> None:
         pass
 
-    def mode_changed(self, mode: str) -> None:
+    async def mode_changed(self, mode: str) -> None:
         pass
 
-    def thinking(self, text: str, duration_s: float | None = None) -> None:
+    async def thinking(self, text: str, duration_s: float | None = None) -> None:
         pass
 
-    def assistant_text(self, text: str) -> None:
+    async def assistant_text(self, text: str) -> None:
         pass
 
-    def tool_status(self, summary: str) -> AbstractContextManager[None]:
+    def tool_status(self, summary: str) -> AbstractAsyncContextManager[None]:
+        # nullcontext supports the async protocol since Python 3.10.
         return nullcontext()
 
-    def tool_result(self, summary: str, is_error: bool = False) -> None:
+    async def tool_result(self, call: ToolCallView) -> None:
         pass
 
-    def notice(self, text: str) -> None:
+    async def usage(self, info: UsageInfo) -> None:
         pass
 
-    def error(self, text: str) -> None:
+    async def notice(self, text: str) -> None:
         pass
 
-    def confirm_shell(self, command: str, description: str | None = None) -> ShellDecision:
+    async def error(self, text: str) -> None:
+        pass
+
+    async def confirm_shell(self, command: str, description: str | None = None) -> ShellDecision:
         # Fail closed: without a user to ask, the command must not run.
         return ShellDecision(approved=False)
 
-    def approve_plan(self, plan_summary: str) -> PlanDecision:
+    async def approve_plan(self, plan_summary: str) -> PlanDecision:
         return PlanDecision(choice="reject", reject_reason="No interactive UI available.")
 
-    def read_user_input(self) -> str:
+    async def read_user_input(self) -> str:
         raise EOFError("No interactive UI available.")
 
     def for_subagent(self) -> UI:
@@ -67,8 +82,8 @@ class QuietUI(NullUI):
     def __init__(self, parent: UI):
         self._parent = parent
 
-    def confirm_shell(self, command: str, description: str | None = None) -> ShellDecision:
-        return self._parent.confirm_shell(command, description)
+    async def confirm_shell(self, command: str, description: str | None = None) -> ShellDecision:
+        return await self._parent.confirm_shell(command, description)
 
-    def approve_plan(self, plan_summary: str) -> PlanDecision:
-        return self._parent.approve_plan(plan_summary)
+    async def approve_plan(self, plan_summary: str) -> PlanDecision:
+        return await self._parent.approve_plan(plan_summary)

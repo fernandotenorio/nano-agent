@@ -21,7 +21,7 @@ from ui.null_ui import NullUI
 class StubREPLUI(NullUI):
     """Silent UI whose REPL prompt still reads from the builtin input(),
     so the existing @patch('builtins.input') plumbing keeps driving main()."""
-    def read_user_input(self) -> str:
+    async def read_user_input(self) -> str:
         return input()
 
 
@@ -819,8 +819,10 @@ class TestMainLoopGroup5(unittest.IsolatedAsyncioTestCase):
     """
 
     def setUp(self):
-        # We must patch sys.argv so argparse doesn't try to parse unittest's CLI args
-        self.argv_patcher = patch.object(sys, "argv", ["agent.py"])
+        # We must patch sys.argv so argparse doesn't try to parse unittest's CLI
+        # args. `--ui rich` keeps main() on the plain front-end, which the stub
+        # below then replaces; the full-screen UI is exercised in test_tui_app.
+        self.argv_patcher = patch.object(sys, "argv", ["agent.py", "--ui", "rich"])
         self.argv_patcher.start()
 
         # These tests exercise the REPL logic, not the rendering: swap the

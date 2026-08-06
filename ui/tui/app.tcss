@@ -1,0 +1,280 @@
+/* Colors come from the theme via App.get_css_variables (see ui/theme.py):
+   every $prisma-* variable below is user-overridable in .prisma/ui.json. */
+
+Screen {
+    layout: vertical;
+}
+
+#header {
+    height: 1;
+    padding: 0 1;
+    background: $prisma-header-bg;
+    color: $prisma-header-text;
+}
+
+#footer {
+    height: 1;
+    padding: 0 1;
+    background: $prisma-footer-bg;
+    color: $prisma-footer-text;
+}
+
+#transcript {
+    height: 1fr;
+    padding: 0 1;
+    scrollbar-size-vertical: 1;
+}
+
+/* --- Blocks ------------------------------------------------------------- */
+
+.block {
+    width: 1fr;
+    height: auto;
+    margin: 1 0 0 0;
+    padding: 0 1;
+}
+
+.block-header {
+    width: 1fr;
+    height: 1;
+}
+
+.block-caption {
+    width: auto;
+    text-style: bold;
+}
+
+.block-time {
+    width: auto;
+    margin-left: 1;
+    color: $text-muted;
+}
+
+.block-body {
+    width: 1fr;
+    height: auto;
+}
+
+/* Markdown indents itself and trails a blank line after each paragraph, which
+   double-spaces blocks that already have their own margins. */
+Markdown {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+}
+
+Markdown > MarkdownParagraph:last-of-type {
+    margin: 0;
+}
+
+.block-user {
+    background: $prisma-user-bg;
+    color: $prisma-user-text;
+    border-left: thick $prisma-user-accent;
+}
+
+.block-user .block-caption {
+    color: $prisma-user-accent;
+}
+
+.block-assistant {
+    background: $prisma-assistant-bg;
+    color: $prisma-assistant-text;
+    border-left: thick $prisma-assistant-accent;
+}
+
+.block-assistant .block-caption {
+    color: $prisma-assistant-accent;
+}
+
+.block-reasoning {
+    background: $prisma-reasoning-bg;
+    color: $prisma-reasoning-text;
+    border-left: thick $prisma-reasoning-accent;
+    border-top: none;
+    padding: 0 1;
+}
+
+.block-reasoning CollapsibleTitle {
+    padding: 0;
+    color: $prisma-reasoning-accent;
+}
+
+.block-reasoning Contents {
+    padding: 0 0 0 3;
+}
+
+/* --- Tool calls --------------------------------------------------------- */
+
+.block-tool {
+    background: $prisma-tool-bg;
+    color: $prisma-tool-text;
+    border-left: thick $prisma-tool-accent;
+}
+
+.tool-failed {
+    border-left: thick $prisma-tool-error;
+}
+
+.tool-summary {
+    width: 1fr;
+    height: auto;
+}
+
+.tool-icon {
+    width: auto;
+    color: $prisma-tool-success;
+}
+
+.tool-failed .tool-icon {
+    color: $prisma-tool-error;
+}
+
+.tool-name {
+    width: auto;
+    margin-left: 1;
+    text-style: bold;
+    color: $prisma-tool-accent;
+}
+
+.tool-text {
+    width: 1fr;
+    margin-left: 1;
+}
+
+.tool-failed .tool-text {
+    color: $prisma-tool-error;
+}
+
+.tool-pane {
+    width: 1fr;
+    height: auto;
+    padding: 0;
+    background: transparent;
+    border-top: none;
+}
+
+.tool-pane CollapsibleTitle {
+    padding: 0;
+    color: $text-muted;
+}
+
+.tool-pane Contents {
+    padding: 0 0 0 3;
+}
+
+.tool-pane-body {
+    color: $text-muted;
+}
+
+/* --- Notices and banner -------------------------------------------------- */
+
+.notice {
+    width: 1fr;
+    height: auto;
+    margin: 1 0 0 0;
+    color: $text-muted;
+}
+
+.notice-error {
+    color: $error;
+    text-style: bold;
+}
+
+.session-banner {
+    width: 1fr;
+    height: auto;
+    margin: 1 0 0 0;
+    color: $text-muted;
+}
+
+.session-line {
+    width: 1fr;
+    height: auto;
+}
+
+.session-warning {
+    color: $warning;
+}
+
+/* --- Approvals ----------------------------------------------------------- */
+
+.block-approval {
+    background: $prisma-user-bg;
+    border-left: thick $warning;
+}
+
+.block-approval:focus {
+    border-left: thick $warning;
+    background-tint: $foreground 5%;
+}
+
+.approval-title {
+    width: 1fr;
+    height: auto;
+    text-style: bold;
+    color: $warning;
+}
+
+.approval-description {
+    width: 1fr;
+    height: auto;
+    color: $text-muted;
+}
+
+.approval-command {
+    width: 1fr;
+    height: auto;
+    text-style: bold;
+}
+
+.approval-plan-body {
+    width: 1fr;
+    height: auto;
+    margin: 1 0;
+}
+
+.approval-hint {
+    width: 1fr;
+    height: auto;
+    color: $text-muted;
+}
+
+/* --- Prompt -------------------------------------------------------------- */
+
+#prompt-area {
+    height: auto;
+    padding: 0 1;
+}
+
+#prompt-hint {
+    height: 1;
+    color: $text-muted;
+}
+
+#slash-commands {
+    height: auto;
+    max-height: 6;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: $prisma-input-bg;
+}
+
+#prompt-input {
+    height: 5;
+    border: tall $prisma-input-border-blurred;
+    background: $prisma-input-bg;
+    color: $prisma-input-text;
+}
+
+#prompt-input:focus {
+    border: tall $prisma-input-border;
+}
+
+.spinner {
+    width: 1fr;
+    height: 1;
+    margin: 1 0 0 0;
+    color: $text-muted;
+}

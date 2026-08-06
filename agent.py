@@ -34,7 +34,7 @@ from filestate import file_changes_hook
 from processes import kill_quietly, terminate_quietly
 from tools.registry import ToolRegistry
 from tools.core import create_core_registry
-from ui.base import UI, SessionInfo
+from ui.base import UI, SessionInfo, ToolCallView, UsageInfo, split_model
 from ui.null_ui import NullUI
 from ui.summaries import summarize_call
 
@@ -240,7 +240,7 @@ async def handle_subagent(
     sub_policy = AgentPolicy(mode=AgentMode.BUILD)
 
     # --- Capture the pristine list of blocks ---
-    with ui.tool_status(f"Running sub-agent '{callback.subagent_type}' ({callback.callback_description})"):
+    async with ui.tool_status(f"Running sub-agent '{callback.subagent_type}' ({callback.callback_description})"):
         final_blocks = await run_agentic_loop(
             sub_transcript, sub_registry, sub_hooks, model=model, policy=sub_policy, ctx=sub_ctx, ui=sub_ui
         )
@@ -281,7 +281,12 @@ async def execute_tool(
     # 1. Pre-Hook
     pre_event = await hooks.trigger_pre_tool(tu.name, tu.input)
     if pre_event.decision == "deny":
-        ui.tool_result(f"{call_summary} - blocked: {pre_event.deny_reason}", is_error=True)
+        await ui.tool_result(ToolCallView(
+            name=tu.name,
+            args=tu.input,
+            summary=f"{call_summary} - blocked: {pre_event.deny_reason}",
+            is_error=True,
+        ))
         return [ToolResultMessageContent(
             tool_use_id=tu.id,
             content=f"Tool blocked: {pre_event.deny_reason}",
@@ -291,12 +296,12 @@ async def execute_tool(
     # 2. Invoke Tool with Error Boundaries
     ui_summary: str | None = None
     try:
-        with ui.tool_status(call_summary):
+        async with ui.tool_status(call_summary):
             raw_result = await registry.invoke(tu.name, tu.input)
         
         # Route Native Callbacks
         if isinstance(raw_result, ShellCallback):
-            with ui.tool_status(call_summary):
+            async with ui.tool_status(call_summary):
                 result_output, is_error, ui_summary = await handle_shell(raw_result, ctx)
         elif isinstance(raw_result, AgentCallback):
             result_output, is_error = await handle_subagent(raw_result, ctx, transcript_path, model=model, ui=ui)
@@ -305,7 +310,7 @@ async def execute_tool(
                 else f"Sub-agent '{raw_result.subagent_type}' completed"
             )
         elif isinstance(raw_result, PlanApprovalCallback):
-            decision = ui.approve_plan(raw_result.plan_summary)
+            decision = await ui.approve_plan(raw_result.plan_summary)
             
             if decision.choice == "build":
                 policy.mode = AgentMode.BUILD
@@ -343,9 +348,17 @@ async def execute_tool(
         is_error = True
 
     if is_error:
-        ui.tool_result(ui_summary or f"{call_summary} - {_error_headline(result_output)}", is_error=True)
+        summary = ui_summary or f"{call_summary} - {_error_headline(result_output)}"
     else:
-        ui.tool_result(ui_summary or call_summary, is_error=False)
+        summary = ui_summary or call_summary
+
+    await ui.tool_result(ToolCallView(
+        name=tu.name,
+        args=tu.input,
+        summary=summary,
+        output=result_output,
+        is_error=is_error,
+    ))
 
     # 3. Format Base Result
     content: list[TextMessageContent | ToolResultMessageContent] = [
@@ -389,10 +402,11 @@ async def run_agentic_loop(
         schemas = current_registry.get_all_schemas()
 
         llm_started_at = time.monotonic()
-        with ui.tool_status(f"Waiting for {model}"):
+        async with ui.tool_status(f"Waiting for {model}"):
             response = await acompletion(model, schemas, transcript.messages)
         llm_duration = time.monotonic() - llm_started_at
         transcript.append(response)
+        await ui.usage(UsageInfo.from_dict(response.usage))
 
         texts = [c for c in response.content if getattr(c, "type", None) == "text"]
         tool_uses = [c for c in response.content if getattr(c, "type", None) == "tool_use"]
@@ -400,10 +414,10 @@ async def run_agentic_loop(
 
         # Reasoning blocks are collapsed into a single subtle line
         if thinkings:
-            ui.thinking("\n\n".join(t.thinking for t in thinkings), duration_s=llm_duration)
+            await ui.thinking("\n\n".join(t.thinking for t in thinkings), duration_s=llm_duration)
 
         for text_block in texts:
-            ui.assistant_text(text_block.text)
+            await ui.assistant_text(text_block.text)
 
         # If LLM doesn't want to use any more tools, break the loop and return texts
         if not tool_uses:
@@ -420,15 +434,25 @@ async def run_agentic_loop(
 
     # Turn ceiling reached: stop the loop instead of running away.
     warning = f"Stopped after reaching the maximum of {MAX_AGENT_TURNS} tool-calling turns for a single prompt."
-    ui.notice(warning)
+    await ui.notice(warning)
     return [TextMessageContent(text=warning)]
 
-def get_transcript_path(app_config: AppConfig, cwd: Path, resume_arg: str | None, ui: UI = NullUI()) -> Path:
-    """Determines where to load/save the transcript file."""
+def get_transcript_path(
+    app_config: AppConfig,
+    cwd: Path,
+    resume_arg: str | None,
+    warnings: list[str] | None = None,
+) -> Path:
+    """Determines where to load/save the transcript file.
+
+    Runs before the UI exists (a full-screen front-end has nothing to draw on
+    yet), so anything worth telling the user is collected into `warnings` and
+    shown later in the session banner.
+    """
     if resume_arg:
         path = Path(resume_arg).expanduser().resolve()
-        if not path.exists():
-            ui.notice(f"Warning: Provided resume path '{path}' does not exist. It will be created.")
+        if not path.exists() and warnings is not None:
+            warnings.append(f"Provided resume path '{path}' does not exist. It will be created.")
         return path
     
     # Default behavior: create a hidden `.agent/transcripts/` folder in the current directory
@@ -448,6 +472,97 @@ def read_git_branch(root: Path) -> str | None:
     if content.startswith("ref: "):
         return content.removeprefix("ref: ").rsplit("/", 1)[-1]
     return content[:8] or None
+
+
+def create_ui(kind: str, app_config: AppConfig, cwd: Path) -> UI:
+    """Builds the single concrete UI for this session.
+
+    Rendering libraries are imported here and nowhere else, so that every
+    other module (and the test suite) never pulls in `rich` or `textual`
+    transitively.
+    """
+    if kind == "rich":
+        from ui.rich_ui import RichUI
+        return RichUI()
+
+    from ui.theme import load_ui_theme
+    from ui.tui import TextualUI
+    return TextualUI(load_ui_theme(app_config, cwd))
+
+
+async def run_repl(
+    ui: UI,
+    info: SessionInfo,
+    transcript: Transcript,
+    registry: ToolRegistry,
+    hooks: HookManager,
+    policy: AgentPolicy,
+    ctx: InvocationContext,
+    model: str,
+) -> None:
+    """The interactive session: banner, then one agentic loop per prompt.
+
+    Runs *inside* whatever lifecycle the UI provides (see `UI.run`), which is
+    why the banner is rendered here rather than during setup: a full-screen
+    front-end has nothing to draw on until its application is up.
+    """
+    await ui.session_start(info)
+
+    while True:
+        try:
+            user_input = await ui.read_user_input()
+            if user_input.strip().lower() in ["/quit", "/exit"]:
+                break
+
+            # Intercept Mode Commands
+            user_input_lower = user_input.strip().lower()
+
+            if user_input_lower.startswith("/plan"):
+                policy.mode = AgentMode.PLAN
+                await ui.mode_changed("PLAN")
+                user_input = user_input[len("/plan"):].strip()
+
+                if not user_input:
+                    continue
+            elif user_input_lower.startswith("/build"):
+                policy.mode = AgentMode.BUILD
+                await ui.mode_changed("BUILD")
+                user_input = user_input[len("/build"):].strip()
+
+                if not user_input:
+                    continue
+
+            if not user_input.strip():
+                continue
+
+            # Fire User Hooks
+            is_first_prompt = not any(isinstance(m, UserMessage) for m in transcript.messages)
+            event = await hooks.trigger_user_prompt(user_input, is_first_prompt)
+
+            if event.block:
+                await ui.error(f"Blocked: {event.block_reason}")
+                continue
+
+            # 3. Assemble the payload: [ PRE, PROMPT, POST ]
+            message_content = [
+                *event.context_pre,
+                TextMessageContent(text=event.prompt),
+                *event.context_post
+            ]
+
+            transcript.append(UserMessage(content=message_content))
+            await run_agentic_loop(transcript, registry, hooks, model=model, policy=policy, ctx=ctx, ui=ui)
+
+        except (KeyboardInterrupt, EOFError):
+            await ui.notice("Exiting...")
+            break
+        except Exception as e:
+            # An API hiccup (rate limit, network blip) or a bug in a hook must
+            # not kill the session: the transcript persists incrementally, so
+            # the conversation can simply continue on the next prompt.
+            logging.exception("Error during agent turn")
+            await ui.error(f"{type(e).__name__}: {e}")
+            await ui.notice("The session is still alive. You can try again or type '/quit' to exit.")
 
 
 async def main():
@@ -491,23 +606,33 @@ async def main():
         help=f"Skip loading {app_config.project_system_prompt_file(cwd)}"
     )
 
-    args = parser.parse_args()
+    parser.add_argument(
+        "--ui",
+        choices=["textual", "rich"],
+        default="textual",
+        help="Front-end to use: the full-screen Textual interface, or plain scrolling output"
+    )
 
-    # The single concrete UI for this session. Imported lazily so that every
-    # other module (and the test suite) never pulls in `rich` transitively.
-    from ui.rich_ui import RichUI
-    ui: UI = RichUI()
+    args = parser.parse_args()
 
     # Workspace root directory resolution and validation
     root_dir = Path(args.workspace_root).expanduser().resolve() if args.workspace_root else cwd
 
-    # Exit with error if cwd it no within workspace dir
+    # Exit with error if cwd it no within workspace dir. This happens before
+    # any UI exists, so it reports itself the only way it can.
     if not cwd.is_relative_to(root_dir):
-        ui.error(f"Current directory ({cwd}) is not within the specified --workspace-root ({root_dir}).")
+        print(
+            f"Current directory ({cwd}) is not within the specified --workspace-root ({root_dir}).",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
+    # Anything discovered during setup that the user should see, held until
+    # the UI is alive and can render the session banner.
+    startup_warnings: list[str] = []
+
     # Creates transcripts folder if it does not exists
-    transcript_file = get_transcript_path(app_config, cwd, args.resume, ui=ui)
+    transcript_file = get_transcript_path(app_config, cwd, args.resume, startup_warnings)
 
     # Probe the environment once. This decides which Grep engine gets
     # registered below, and what the startup banner and system prompt warn about.
@@ -541,6 +666,8 @@ async def main():
     hooks.register_user_prompt(bound_mode_hook)
     hooks.register_user_prompt(bound_file_changes_hook)
 
+    ui = create_ui(args.ui, app_config, cwd)
+
     # Safety gate: every Shell command requires explicit user confirmation
     hooks.register_pre_tool(partial(shell_confirmation_hook, ui=ui))
     
@@ -550,8 +677,10 @@ async def main():
     # System Prompt injection (only if transcript is brand new)
     if len(transcript.messages) == 0:
         transcript.append(build_system_prompt(app_config, cwd, ctx, args))
-    
-    ui.session_start(SessionInfo(
+
+    provider, _ = split_model(args.model)
+
+    info = SessionInfo(
         app_name=app_config.app_name.capitalize(),
         model=args.model,
         mode=policy.mode.name,
@@ -559,64 +688,21 @@ async def main():
         cwd=cwd,
         transcript_path=transcript_file,
         git_branch=read_git_branch(root_dir) if ctx.workspace_is_git_repo else None,
-        warnings=tuple(user_warnings(capabilities)),
+        provider=provider,
+        warnings=tuple(startup_warnings + user_warnings(capabilities)),
+    )
+
+    await ui.run(partial(
+        run_repl,
+        ui=ui,
+        info=info,
+        transcript=transcript,
+        registry=registry,
+        hooks=hooks,
+        policy=policy,
+        ctx=ctx,
+        model=args.model,
     ))
-    
-    while True:
-        try:
-            user_input = ui.read_user_input()
-            if user_input.strip().lower() in ["/quit", "/exit"]:
-                break
-
-            # Intercept Mode Commands
-            user_input_lower = user_input.strip().lower()
-
-            if user_input_lower.startswith("/plan"):
-                policy.mode = AgentMode.PLAN
-                ui.mode_changed("PLAN")
-                user_input = user_input[len("/plan"):].strip()
-
-                if not user_input:
-                    continue
-            elif user_input_lower.startswith("/build"):
-                policy.mode = AgentMode.BUILD
-                ui.mode_changed("BUILD")
-                user_input = user_input[len("/build"):].strip()
-
-                if not user_input:
-                    continue
-
-            if not user_input.strip():
-                continue
-
-            # Fire User Hooks
-            is_first_prompt = not any(isinstance(m, UserMessage) for m in transcript.messages)
-            event = await hooks.trigger_user_prompt(user_input, is_first_prompt)
-            
-            if event.block:
-                ui.error(f"Blocked: {event.block_reason}")
-                continue
-
-            # 3. Assemble the payload: [ PRE, PROMPT, POST ]
-            message_content = [
-                *event.context_pre,
-                TextMessageContent(text=event.prompt),
-                *event.context_post
-            ]
-            
-            transcript.append(UserMessage(content=message_content))
-            await run_agentic_loop(transcript, registry, hooks, model=args.model, policy=policy, ctx=ctx, ui=ui)
-            
-        except (KeyboardInterrupt, EOFError):
-            ui.notice("Exiting...")
-            break
-        except Exception as e:
-            # An API hiccup (rate limit, network blip) or a bug in a hook must
-            # not kill the session: the transcript persists incrementally, so
-            # the conversation can simply continue on the next prompt.
-            logging.exception("Error during agent turn")
-            ui.error(f"{type(e).__name__}: {e}")
-            ui.notice("The session is still alive. You can try again or type '/quit' to exit.")
 
 if __name__ == "__main__":
     asyncio.run(main())
