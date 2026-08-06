@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 import pydantic
 from typing import Any, Callable, Awaitable, Union
 from typedefs import ShellCallback, AgentCallback, PlanApprovalCallback, TextMessageContent, ToolFailure, ToolResult
@@ -48,11 +49,18 @@ class ToolRegistry:
         return list(self._tools.values())
 
     async def invoke(self, name: str, kwargs: dict) -> ToolReturnType:
+        # Failures are returned as ToolFailure, never as a plain string: the
+        # agent loop reads a bare string as a successful result, which would
+        # report a crashed tool to the model under a green check.
         if name not in self._callables:
-            return f"Error: Tool '{name}' not found."
-        
+            return ToolFailure(
+                error_message=f"Error: Tool '{name}' not found.",
+                ui_summary=f"Unknown tool '{name}'",
+            )
+
         try:
             # Execute the native python function
             return await self._callables[name](kwargs)
         except Exception as e:
-            return f"Error: tool '{name}': {str(e)}"
+            logging.exception("Tool %r raised", name)
+            return ToolFailure(error_message=f"Error: tool '{name}': {str(e)}")

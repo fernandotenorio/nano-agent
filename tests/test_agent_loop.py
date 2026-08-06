@@ -315,6 +315,29 @@ class TestExecuteToolGroup2(unittest.IsolatedAsyncioTestCase):
         self.hooks.trigger_post_tool.assert_not_called()
 
     @patch("builtins.print")
+    async def test_registry_tool_failure_is_not_reported_as_success(self, mock_print):
+        """
+        Test 2.6: Crash Reported by the Registry
+        ToolRegistry.invoke catches exceptions itself and returns a ToolFailure.
+        That must reach the LLM flagged as an error, with post-hooks skipped;
+        the old plain-string return made a crashed tool look successful.
+        """
+        # Setup: the real registry's own error envelope, not a raised exception
+        self.registry.invoke.return_value = ToolFailure(
+            error_message="Error: tool 'TestTool': Corrupted JSON payload"
+        )
+
+        # Action
+        result = await execute_tool(self.tu, self.registry, self.hooks, self.transcript_path, self.model, self.policy, self.ctx)
+
+        # Assertions
+        self.assertEqual(len(result), 1)
+        self.assertTrue(result[0].is_error)
+        self.assertIn("Corrupted JSON payload", result[0].content)
+
+        self.hooks.trigger_post_tool.assert_not_called()
+
+    @patch("builtins.print")
     async def test_post_hook_context_injection(self, mock_print):
         """
         Test 2.5: Post-Hook Context Injection
@@ -444,7 +467,9 @@ class TestHandleShellGroup3(unittest.IsolatedAsyncioTestCase):
     async def test_output_truncation(self, mock_create_shell, mock_print):
         """
         Test 3.3: Output Truncation
-        Checks that huge outputs are safely truncated to exactly 30,000 bytes.
+        Checks that huge outputs are cut to 30,000 characters AND that the
+        model is told the tail is missing, so it can't draw conclusions from
+        output it never saw.
         """
         # Setup: Create 40,000 bytes of data (exceeds the 30,000 limit)
         huge_stdout = b"A" * 40000
@@ -452,12 +477,14 @@ class TestHandleShellGroup3(unittest.IsolatedAsyncioTestCase):
         mock_create_shell.return_value = mock_process
         
         # Action
-        text, is_error, _ui_summary = await handle_shell(self.callback, self.ctx)
+        text, is_error, ui_summary = await handle_shell(self.callback, self.ctx)
         
         # Assertions
         self.assertFalse(is_error)
-        self.assertEqual(len(text), 30000)
-        self.assertTrue(text.startswith("AAAA"))
+        self.assertTrue(text.startswith("A" * 30000))
+        self.assertNotIn("A" * 30001, text)
+        self.assertIn("Output truncated", text)
+        self.assertIn("output truncated", ui_summary)
 
     @patch("builtins.print")
     @patch("asyncio.create_subprocess_shell")
@@ -482,6 +509,63 @@ class TestHandleShellGroup3(unittest.IsolatedAsyncioTestCase):
         # Ensure we tried to safely terminate, and when it didn't respond to that, kill it
         mock_process.terminate.assert_called_once()
         mock_process.kill.assert_called_once()
+
+    @patch("builtins.print")
+    @patch("asyncio.create_subprocess_shell")
+    async def test_output_under_cap_has_no_truncation_notice(self, mock_create_shell, mock_print):
+        """
+        Test 3.3b: No False Truncation Notice
+        Output that fits under the cap must come back verbatim, so the notice
+        can be trusted to mean something when it does appear.
+        """
+        # Setup: comfortably under the 30,000 character cap
+        mock_process = self._create_mock_process(b"B" * 29999, b"", exit_code=0)
+        mock_create_shell.return_value = mock_process
+
+        # Action
+        text, is_error, ui_summary = await handle_shell(self.callback, self.ctx)
+
+        # Assertions
+        self.assertFalse(is_error)
+        self.assertEqual(text, "B" * 29999)
+        self.assertNotIn("truncated", ui_summary)
+
+    @patch("builtins.print")
+    @patch("asyncio.create_subprocess_shell")
+    async def test_timeout_tolerates_already_exited_process(self, mock_create_shell, mock_print):
+        """
+        Test 3.8: Signalling a Process That Already Died
+        A process can exit between the timeout firing and us signalling it.
+        Once asyncio has reaped it, terminate() raises ProcessLookupError, which
+        must not surface as a tool crash: the process being gone is the outcome
+        we were asking for.
+        """
+        mock_process = self._create_mock_process(b"partial out", b"", exit_code=0)
+
+        # The first wait() outlives the 0.1s timeout; by the time we signal, the
+        # process is gone, so terminate() reports it as already reaped and the
+        # follow-up wait() returns at once.
+        calls = {"count": 0}
+
+        async def mock_wait():
+            calls["count"] += 1
+            if calls["count"] == 1:
+                await asyncio.sleep(10.0)
+            return 0
+
+        mock_process.wait = mock_wait
+        mock_process.terminate = MagicMock(side_effect=ProcessLookupError())
+        mock_create_shell.return_value = mock_process
+
+        # Action
+        text, is_error, _ui_summary = await handle_shell(self.callback, self.ctx)
+
+        # Assertions
+        self.assertTrue(is_error)
+        self.assertIn("Command timed out after 0.1s", text)
+        self.assertIn("partial out", text)
+
+        mock_process.terminate.assert_called_once()
 
     @patch("agent.SHELL_DRAIN_GRACE", 0.05)
     @patch("builtins.print")

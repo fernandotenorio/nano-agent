@@ -86,6 +86,42 @@ class TestFilesystemTools(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(result, str)
         self.assertIn("Warning: the file only has 1 lines", result)
 
+    async def test_read_coerces_non_integer_offset_and_limit(self):
+        """A field typed 'number' in the schema arrives as 2.0 or "2" often
+        enough that Read must coerce it; these values feed range() directly."""
+        file_path = self.base_path / "five.txt"
+        file_path.write_text("a\nb\nc\nd\ne", encoding="utf-8")
+
+        for offset, limit in ((2.0, 2.0), ("2", "2")):
+            with self.subTest(offset=offset, limit=limit):
+                result = await _read_impl(
+                    {"file_path": str(file_path), "offset": offset, "limit": limit},
+                    self.ctx,
+                )
+
+                self.assertIsInstance(result, str)
+                self.assertIn("    2→b", result)
+                self.assertIn("    3→c", result)
+                self.assertNotIn("→a", result)
+                self.assertNotIn("→d", result)
+
+    async def test_read_falls_back_on_unusable_offset_and_limit(self):
+        """Junk is ignored rather than failing the Read: the defaults read the
+        whole of a small file, which is what the model wanted anyway."""
+        file_path = self.base_path / "three.txt"
+        file_path.write_text("a\nb\nc", encoding="utf-8")
+
+        for junk in ("abc", None, -5, 0, []):
+            with self.subTest(junk=junk):
+                result = await _read_impl(
+                    {"file_path": str(file_path), "offset": junk, "limit": junk},
+                    self.ctx,
+                )
+
+                self.assertIsInstance(result, str)
+                self.assertIn("    1→a", result)
+                self.assertIn("    3→c", result)
+
     async def test_read_size_and_token_limits(self):
         file_path = self.base_path / "huge.txt"
         

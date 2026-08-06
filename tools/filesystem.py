@@ -6,12 +6,14 @@ from pathlib import Path
 from typedefs import ToolFailure, ToolResult
 from textwrap import dedent
 from typing import Any
+from tools.args import as_count
 from tools.registry import ToolRegistry, ToolReturnType
 from tools.paths import resolve_in_workspace
 from sessioncontext import InvocationContext
 from filestate import MAX_FILE_BYTES, FileStateTracker
 
 MAX_TOKENS: int = 24000
+DEFAULT_READ_LIMIT: int = 2000
 
 # Read-before-write state lives on ctx.file_state (one tracker per agent loop);
 # see filestate.FileStateTracker. Freshness is verified on demand at the write
@@ -42,7 +44,7 @@ def display_path(path: Path, ctx: InvocationContext) -> str:
     except ValueError:
         return str(path)
 
-def format_lines(lines: list[str], offset: int = 1, limit: int = 2000) -> str:
+def format_lines(lines: list[str], offset: int = 1, limit: int = DEFAULT_READ_LIMIT) -> str:
     """Pretty-prints lines with 1-based line numbers (e.g. '   12→ code')."""
     texts: list[str] = []
     start0 = max(0, offset - 1)
@@ -64,8 +66,11 @@ async def _read_impl(kwargs: dict[str, Any], ctx: InvocationContext) -> ToolRetu
     if isinstance(file_path, ToolFailure):
         return file_path
 
-    limit: int = kwargs.get("limit", 2000)
-    offset: int = kwargs.get("offset", 1)
+    # Both feed range() further down, so they must be real ints: a schema field
+    # typed "number" routinely arrives as 100.0 or "100". Junk falls back to the
+    # default rather than failing a Read over a formatting detail.
+    limit: int = as_count(kwargs, "limit") or DEFAULT_READ_LIMIT
+    offset: int = as_count(kwargs, "offset") or 1
 
     # 2. File existence check with "Did you mean?" heuristic
     if not file_path.exists():

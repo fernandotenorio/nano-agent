@@ -1,3 +1,4 @@
+import asyncio
 import dataclasses
 import os
 import shutil
@@ -658,6 +659,65 @@ class TestGrepTool(unittest.IsolatedAsyncioTestCase):
 
         fallback.assert_called_once_with(registry, ctx)
         rg_backend.assert_not_called()
+
+
+class TestRunRipgrepSignalling(unittest.IsolatedAsyncioTestCase):
+    """
+    Test Suite for _run_rg's process handling.
+
+    Both paths that abandon a search kill the child. ripgrep may already have
+    exited by then (it is fast, and the streams are drained separately), in
+    which case asyncio has reaped it and kill() raises ProcessLookupError.
+    That must not become a tool failure. No rg binary is needed here: the
+    process is faked outright.
+    """
+
+    def _mock_process(self, stdout: bytes, *, stdout_eof: bool, exit_code: int = 0):
+        """Builds a fake subprocess whose kill() reports it as already reaped."""
+        process = MagicMock()
+
+        stdout_stream = asyncio.StreamReader()
+        stdout_stream.feed_data(stdout)
+        if stdout_eof:
+            stdout_stream.feed_eof()
+
+        stderr_stream = asyncio.StreamReader()
+        stderr_stream.feed_eof()
+
+        process.stdout = stdout_stream
+        process.stderr = stderr_stream
+
+        async def mock_wait():
+            return exit_code
+
+        process.wait = mock_wait
+        process.kill = MagicMock(side_effect=ProcessLookupError())
+
+        return process
+
+    async def test_timeout_tolerates_already_exited_ripgrep(self):
+        # Setup: stdout never reaches EOF, so the read outlives the deadline
+        process = self._mock_process(b"partial", stdout_eof=False)
+
+        with patch("asyncio.create_subprocess_exec", return_value=process), \
+             patch("tools.grep.RG_TIMEOUT", 0.01):
+            outcome = await grep._run_rg(["rg", "needle"], cwd=Path.cwd())
+
+        self.assertIsInstance(outcome, ToolFailure)
+        self.assertIn("timed out", outcome.error_message)
+        process.kill.assert_called_once()
+
+    async def test_overflow_tolerates_already_exited_ripgrep(self):
+        # Setup: more output than the cap allows, so the search is cut short
+        process = self._mock_process(b"x" * 100, stdout_eof=False)
+
+        with patch("asyncio.create_subprocess_exec", return_value=process), \
+             patch("tools.grep.MAX_OUTPUT_BYTES", 10):
+            outcome = await grep._run_rg(["rg", "needle"], cwd=Path.cwd())
+
+        # Output captured before the kill is still valid and must be returned.
+        self.assertEqual(outcome, ("x" * 100, True))
+        process.kill.assert_called_once()
 
 
 if __name__ == "__main__":

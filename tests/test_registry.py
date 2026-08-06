@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import AsyncMock
 
 from tools.registry import ToolRegistry
+from typedefs import ToolFailure
 
 
 class TestToolRegistry(unittest.IsolatedAsyncioTestCase):
@@ -70,21 +71,25 @@ class TestToolRegistry(unittest.IsolatedAsyncioTestCase):
         mock_func.assert_called_once_with({"arg1": 123})
 
     async def test_missing_tool_invocation(self):
-        """Test 2.2: invoke safely handles requests for tools that do not exist."""
+        """Test 2.2: invoke reports an unknown tool as an explicit failure.
+
+        It must not be a bare string: the agent loop reads those as successes.
+        """
         result = await self.registry.invoke("GhostTool", {})
         
-        self.assertIsInstance(result, str)
-        self.assertEqual(result, "Error: Tool 'GhostTool' not found.")
+        self.assertIsInstance(result, ToolFailure)
+        self.assertEqual(result.error_message, "Error: Tool 'GhostTool' not found.")
 
     async def test_exception_handling_during_invocation(self):
-        """Test 2.3: native Python exceptions inside tools are caught and converted to error strings."""
+        """Test 2.3: native Python exceptions inside tools become ToolFailure."""
         mock_func = AsyncMock(side_effect=ValueError("Corrupted state variables!"))
         self.registry.register("CrashTool", "Desc", {}, mock_func)
         
-        result = await self.registry.invoke("CrashTool", {})
+        with self.assertLogs(level="ERROR"):
+            result = await self.registry.invoke("CrashTool", {})
         
-        self.assertIsInstance(result, str)
-        self.assertEqual(result, "Error: tool 'CrashTool': Corrupted state variables!")
+        self.assertIsInstance(result, ToolFailure)
+        self.assertEqual(result.error_message, "Error: tool 'CrashTool': Corrupted state variables!")
 
 
     # ---------------------------------------------------------

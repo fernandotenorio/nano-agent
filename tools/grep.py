@@ -41,15 +41,11 @@ from typing import Any
 
 from capabilities import RIPGREP_GITIGNORE_NOTE
 from notices import with_note
+from processes import kill_quietly
 from sessioncontext import InvocationContext
 from tools import grep_render as render
-from tools.grep_args import (
-    OUTPUT_MODES,
-    as_count,
-    as_flag,
-    as_str_list,
-    parse_request,
-)
+from tools.args import as_count, as_flag, as_str_list
+from tools.grep_args import OUTPUT_MODES, parse_request
 from tools.grep_render import GrepRecord, RecordKind
 from tools.ignore import IgnoreMatcher
 from tools.registry import ToolRegistry, ToolReturnType
@@ -205,7 +201,7 @@ async def _run_rg(args: list[str], cwd: Path) -> tuple[str, bool] | ToolFailure:
     except asyncio.TimeoutError:
         stdout_task.cancel()
         stderr_task.cancel()
-        process.kill()
+        kill_quietly(process)
         await process.wait()
         return ToolFailure(
             error_message=(
@@ -216,7 +212,7 @@ async def _run_rg(args: list[str], cwd: Path) -> tuple[str, bool] | ToolFailure:
 
     if overflowed:
         # We already hold more output than we can show; stop the search.
-        process.kill()
+        kill_quietly(process)
 
     try:
         stderr_bytes, _ = await asyncio.wait_for(stderr_task, RG_DRAIN_GRACE)

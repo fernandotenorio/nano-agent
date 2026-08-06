@@ -36,14 +36,8 @@ from capabilities import IGNORE_WIDENED_NOTE
 from notices import with_note
 from sessioncontext import InvocationContext
 from tools import grep_render as render
-from tools.grep_args import (
-    OUTPUT_MODES,
-    GrepRequest,
-    as_count,
-    as_flag,
-    as_str_list,
-    parse_request,
-)
+from tools.args import as_count, as_flag, as_str_list
+from tools.grep_args import OUTPUT_MODES, GrepRequest, parse_request
 from tools.grep_render import GrepRecord, RecordKind
 from tools.ignore import IgnoreMatcher
 from tools.registry import ToolRegistry, ToolReturnType

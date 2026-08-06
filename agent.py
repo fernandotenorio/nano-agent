@@ -31,6 +31,7 @@ from hooks import (
     shell_confirmation_hook,
 )
 from filestate import file_changes_hook
+from processes import kill_quietly, terminate_quietly
 from tools.registry import ToolRegistry
 from tools.core import create_core_registry
 from ui.base import UI, SessionInfo
@@ -46,9 +47,37 @@ logging.basicConfig(level=logging.WARNING)
 # arrive; we take whatever was captured and move on.
 SHELL_DRAIN_GRACE = 5.0
 
+# How much of each stream reaches the model. Applied per stream, not to the
+# combined output.
+MAX_SHELL_OUTPUT = 30000
 
-def _decode_output(parts: list[bytes], limit: int) -> str:
-    return b''.join(parts).decode('utf-8', errors='replace')[:limit]
+
+class _StreamCapture:
+    """Accumulates one stream up to a cap, remembering what it had to drop.
+
+    The dropped-output flag has to live on an object rather than be returned by
+    the reader: on the timeout path the reader tasks are cancelled, so the
+    caller reads the buffers directly and never sees a return value.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.truncated = False
+        self._parts: list[bytes] = []
+        self._size = 0
+
+    def add(self, chunk: bytes) -> None:
+        if self._size >= self.limit:
+            self.truncated = True
+            return
+        self._parts.append(chunk)
+        self._size += len(chunk)
+
+    def text(self) -> str:
+        decoded = b''.join(self._parts).decode('utf-8', errors='replace')
+        if len(decoded) > self.limit:
+            self.truncated = True
+        return decoded[:self.limit]
 
 
 async def handle_shell(callback: ShellCallback, ctx: InvocationContext) -> tuple[str, bool, str]:
@@ -56,7 +85,6 @@ async def handle_shell(callback: ShellCallback, ctx: InvocationContext) -> tuple
     Executes a shell command natively with timeouts and streaming partial output.
     Returns (output_text, is_error, ui_summary).
     """
-    MAX_OUTPUT = 30000
     started_at = time.monotonic()
     
     # Pin the working directory to the agent's cwd (always inside the workspace).
@@ -67,33 +95,32 @@ async def handle_shell(callback: ShellCallback, ctx: InvocationContext) -> tuple
         cwd=str(ctx.cwd)
     )
 
-    # Concurrently read stdout and stderr, accumulating up to MAX_OUTPUT bytes
+    # Concurrently read stdout and stderr, accumulating up to MAX_SHELL_OUTPUT bytes
     assert process.stdout is not None and process.stderr is not None
-    stdout_parts: list[bytes] = []
-    stderr_parts: list[bytes] = []
+    stdout_capture = _StreamCapture(MAX_SHELL_OUTPUT)
+    stderr_capture = _StreamCapture(MAX_SHELL_OUTPUT)
     
-    async def read_stream(stream: asyncio.StreamReader, parts: list[bytes]) -> str:
+    async def read_stream(stream: asyncio.StreamReader, capture: _StreamCapture) -> str:
         # Always drain to EOF: stopping reads early would fill the OS pipe
         # buffer and block the child process until the timeout kills it.
         # We just stop *accumulating* once the output cap is reached.
         while chunk := await stream.read(8192):
-            if sum(len(part) for part in parts) < MAX_OUTPUT:
-                parts.append(chunk)
-        return _decode_output(parts, MAX_OUTPUT)
+            capture.add(chunk)
+        return capture.text()
 
-    stdout_task = asyncio.create_task(read_stream(process.stdout, stdout_parts))
-    stderr_task = asyncio.create_task(read_stream(process.stderr, stderr_parts))
+    stdout_task = asyncio.create_task(read_stream(process.stdout, stdout_capture))
+    stderr_task = asyncio.create_task(read_stream(process.stderr, stderr_capture))
 
     # Wait for completion or timeout
     exit_code: int | Literal["timeout"]
     try:
         exit_code = await asyncio.wait_for(process.wait(), callback.timeout)
     except asyncio.TimeoutError:
-        process.terminate()
+        terminate_quietly(process)
         try:
             await asyncio.wait_for(process.wait(), timeout=5.0)
         except asyncio.TimeoutError:
-            process.kill()
+            kill_quietly(process)
             await process.wait()
         exit_code = "timeout"
     
@@ -108,8 +135,8 @@ async def handle_shell(callback: ShellCallback, ctx: InvocationContext) -> tuple
     except asyncio.TimeoutError:
         stdout_task.cancel()
         stderr_task.cancel()
-        stdout = _decode_output(stdout_parts, MAX_OUTPUT)
-        stderr = _decode_output(stderr_parts, MAX_OUTPUT)
+        stdout = stdout_capture.text()
+        stderr = stderr_capture.text()
         drained = False
 
     elapsed = time.monotonic() - started_at
@@ -131,6 +158,15 @@ async def handle_shell(callback: ShellCallback, ctx: InvocationContext) -> tuple
     text = text.strip() or "Command completed with no output."
     if not drained:
         text += "\n(Output streams stayed open, likely a backgrounded process; showing partial output.)"
+
+    # Silently dropping the tail of a build log would let the model conclude
+    # things about output it never saw.
+    if stdout_capture.truncated or stderr_capture.truncated:
+        text += (
+            f"\n(Output truncated: only the first {MAX_SHELL_OUTPUT} characters of each "
+            "stream are shown. Narrow or filter the command to see the rest.)"
+        )
+        ui_summary += " - output truncated"
 
     return text, is_error, ui_summary
 
