@@ -58,6 +58,8 @@ def to_openai_message(message: Message, add_cache_control: bool) -> list[dict[st
     elif isinstance(message, AssistantMessage):
         tool_calls = []
         text_parts = []
+        signed_thinking: list[dict[str, Any]] = []
+        unsigned_thinking: list[str] = []
         for item in message.content:
             if isinstance(item, ToolUseMessageContent):
                 tool_calls.append({
@@ -70,8 +72,29 @@ def to_openai_message(message: Message, add_cache_control: bool) -> list[dict[st
                 })
             elif isinstance(item, TextMessageContent):
                 text_parts.append(item.text)
+            elif isinstance(item, ThinkingMessageContent):
+                # A signature is the provider's proof that it produced this
+                # reasoning. Anthropic verifies it and rejects thinking blocks
+                # without one, so unsigned reasoning cannot travel as a block.
+                if item.signature:
+                    signed_thinking.append({
+                        "type": "thinking",
+                        "thinking": item.thinking,
+                        "signature": item.signature,
+                    })
+                elif item.thinking:
+                    unsigned_thinking.append(item.thinking)
 
         res: dict[str, Any] = {"role": "assistant"}
+        # LiteLLM carries reasoning on the assistant message itself, never inside
+        # `content`: `thinking_blocks` is replayed verbatim (Anthropic, Bedrock,
+        # Gemini) and `reasoning_content` is the plain-text form (DeepSeek,
+        # Ollama, Gemini). Emit only one — Gemini replays both, which would send
+        # the same reasoning twice.
+        if signed_thinking:
+            res["thinking_blocks"] = signed_thinking
+        elif unsigned_thinking:
+            res["reasoning_content"] = "\n".join(unsigned_thinking)
         combined_text = "\n".join(text_parts) if text_parts else None
         if combined_text:
             res["content"] = combined_text
