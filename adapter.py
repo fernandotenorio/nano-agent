@@ -248,4 +248,10 @@ async def acompletion(
     # Call the LLM. Progress indication is the caller's responsibility
     # (the agent loop wraps this call in a UI status spinner).
     response = await litellm.acompletion(**kwargs)
-    return parse_assistant_response(response)
+
+    message = parse_assistant_response(response)
+    # Only the caller knows which model string was asked for; providers report
+    # their own name back, often without the provider prefix.
+    message.request_model = model
+
+    return message

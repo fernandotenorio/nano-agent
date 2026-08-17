@@ -13,6 +13,10 @@ from ui.base import (
     ShellDecision,
     ToolCallView,
     UsageInfo,
+    UsageProvider,
+    UsageReport,
+    UsageRow,
+    UsageSection,
     split_model,
 )
 from ui.null_ui import NullUI, QuietUI
@@ -25,6 +29,10 @@ __all__ = [
     "PlanDecision",
     "ToolCallView",
     "UsageInfo",
+    "UsageProvider",
+    "UsageReport",
+    "UsageRow",
+    "UsageSection",
     "split_model",
     "NullUI",
     "QuietUI",

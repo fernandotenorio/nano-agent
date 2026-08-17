@@ -4,7 +4,14 @@ from pathlib import Path
 
 from textual.widgets import Collapsible
 
-from ui.base import SessionInfo, ToolCallView, UsageInfo
+from ui.base import (
+    SessionInfo,
+    ToolCallView,
+    UsageInfo,
+    UsageReport,
+    UsageRow,
+    UsageSection,
+)
 from ui.theme import DEFAULT_THEME
 from ui.tui.app import PrismaApp
 from ui.tui.ui import TextualUI
@@ -18,7 +25,10 @@ from ui.tui.widgets import (
     ShellApprovalBlock,
     SpinnerLine,
     ToolBlock,
+    UsageButton,
+    UsageScreen,
 )
+from ui.tui.widgets.prompt import SLASH_COMMANDS
 
 
 def session_info(**overrides) -> SessionInfo:
@@ -167,7 +177,7 @@ class TestSlashCommands(TuiTestCase):
             await pilot.press("slash")
             await pilot.pause()
             self.assertTrue(commands.display)
-            self.assertEqual(commands.option_count, 4)
+            self.assertEqual(commands.option_count, len(SLASH_COMMANDS))
 
             await pilot.press("p")
             await pilot.pause()
@@ -508,7 +518,7 @@ class TestChrome(TuiTestCase):
         async with app.run_test() as pilot:
             await pilot.pause()
 
-            rendered = str(app.query_one(FooterBar).content)
+            rendered = str(app.query_one("#footer-info").content)
 
             self.assertIn("ollama", rendered)
             self.assertIn("gemma3:12b", rendered)
@@ -575,7 +585,7 @@ class TestTextualUIAdapter(TuiTestCase):
             # The spinner is gone once its block exits.
             self.assertEqual(len(app.query(SpinnerLine)), 0)
             self.assertIn("PLAN", str(app.query_one(HeaderBar).content))
-            self.assertIn("12 tokens", str(app.query_one(FooterBar).content))
+            self.assertIn("12 tokens", str(app.query_one("#footer-info").content))
 
     async def test_read_user_input_reaches_the_prompt(self):
         received: list[str] = []
@@ -626,6 +636,202 @@ class TestTextualUIAdapter(TuiTestCase):
     async def test_using_the_ui_before_it_runs_is_an_error(self):
         with self.assertRaises(RuntimeError):
             await TextualUI(DEFAULT_THEME).notice("too early")
+
+
+def usage_report(**overrides) -> UsageReport:
+    defaults = dict(
+        sections=(
+            UsageSection(
+                title="By agent",
+                rows=(
+                    UsageRow(label="main", input_tokens=300, output_tokens=30, calls=2),
+                    UsageRow(label="subagent:explore", input_tokens=100, output_tokens=10, calls=1),
+                ),
+            ),
+            UsageSection(
+                title="By tool",
+                rows=(UsageRow(label="Read", input_tokens=150, output_tokens=15, calls=1),),
+                note="Split evenly between the tools of a turn.",
+            ),
+        ),
+        totals=UsageRow(
+            label="Total", input_tokens=400, output_tokens=40, cached_tokens=90, calls=3
+        ),
+    )
+    defaults.update(overrides)
+    return UsageReport(**defaults)
+
+
+class TestUsageScreen(TuiTestCase):
+    """
+    Test Suite for the usage view (ui/tui/widgets/usage.py).
+
+    The breakdown is a snapshot of the whole session rather than something that
+    happened at a point in it, which is why it is a modal and why asking twice
+    has to refresh it instead of stacking a second copy.
+    """
+
+    def build(self, session, provider=None) -> PrismaApp:
+        return PrismaApp(DEFAULT_THEME, session, provider or usage_report)
+
+    async def parked_app(self, provider=None) -> PrismaApp:
+        async def session():
+            await self.parked.wait()
+
+        return self.build(session, provider)
+
+    async def test_ctrl_u_opens_the_view(self):
+        app = await self.parked_app()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+u")
+            await pilot.pause()
+
+            self.assertIsInstance(app.screen, UsageScreen)
+
+    async def test_ctrl_u_wins_over_the_prompt(self):
+        """TextArea binds Ctrl+U itself, and the prompt normally holds focus."""
+        app = await self.parked_app()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one(PromptInput).text = "some text"
+            app.query_one(PromptInput).focus()
+            await pilot.pause()
+
+            await pilot.press("ctrl+u")
+            await pilot.pause()
+
+            self.assertIsInstance(app.screen, UsageScreen)
+            self.assertEqual(app.query_one(PromptInput).text, "some text")
+
+    async def test_escape_dismisses_the_view(self):
+        app = await self.parked_app()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+u")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+
+            self.assertNotIsInstance(app.screen, UsageScreen)
+
+    async def test_the_footer_button_opens_the_view(self):
+        app = await self.parked_app()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.click(UsageButton)
+            await pilot.pause()
+
+            self.assertIsInstance(app.screen, UsageScreen)
+
+    async def test_asking_twice_refreshes_rather_than_stacks(self):
+        app = await self.parked_app()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            depth = len(app.screen_stack)
+
+            await pilot.press("ctrl+u")
+            await pilot.pause()
+            app.action_show_usage()
+            await pilot.pause()
+
+            self.assertIsInstance(app.screen, UsageScreen)
+            self.assertEqual(len(app.screen_stack), depth + 1)
+
+    async def test_the_report_is_built_when_asked_for_not_before(self):
+        calls: list[int] = []
+
+        def provider() -> UsageReport:
+            calls.append(1)
+            return usage_report()
+
+        app = await self.parked_app(provider)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            self.assertEqual(calls, [])
+
+            await pilot.press("ctrl+u")
+            await pilot.pause()
+
+            self.assertEqual(len(calls), 1)
+
+    async def test_without_a_provider_the_binding_does_nothing(self):
+        async def session():
+            await self.parked.wait()
+
+        app = PrismaApp(DEFAULT_THEME, session)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+u")
+            await pilot.pause()
+
+            self.assertNotIsInstance(app.screen, UsageScreen)
+
+    async def test_every_section_becomes_a_table(self):
+        app = await self.parked_app()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+u")
+            await pilot.pause()
+
+            tables = app.screen.query(".usage-table")
+            self.assertEqual(len(tables), 2)
+            self.assertEqual(tables.first().row_count, 2)
+
+    async def test_a_section_note_is_shown(self):
+        app = await self.parked_app()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+u")
+            await pilot.pause()
+
+            notes = app.screen.query(".usage-note")
+            self.assertEqual(len(notes), 1)
+
+    async def test_the_totals_line_summarises_the_session(self):
+        app = await self.parked_app()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+u")
+            await pilot.pause()
+
+            rendered = str(app.screen.query_one("#usage-totals").content)
+
+            self.assertIn("440 tokens", rendered)
+            self.assertIn("90 cached", rendered)
+            self.assertIn("3 model calls", rendered)
+
+    async def test_an_empty_session_says_so_instead_of_showing_tables(self):
+        app = await self.parked_app(UsageReport)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+u")
+            await pilot.pause()
+
+            self.assertEqual(len(app.screen.query(".usage-table")), 0)
+            self.assertEqual(len(app.screen.query(".usage-empty")), 1)
+
+    async def test_the_adapter_forwards_show_usage(self):
+        ui = TextualUI(DEFAULT_THEME)
+
+        async def session():
+            await ui.show_usage(usage_report())
+            self.finished.set()
+            await self.parked.wait()
+
+        app = self.build(session)
+        ui._app = app
+
+        async with app.run_test() as pilot:
+            await self.settled(pilot)
+
+            self.assertIsInstance(app.screen, UsageScreen)
+
+    async def test_the_adapter_hands_its_provider_to_the_app(self):
+        ui = TextualUI(DEFAULT_THEME)
+        ui.set_usage_provider(usage_report)
+
+        self.assertIs(ui._usage_provider, usage_report)
 
 
 class TestSessionLifecycle(TuiTestCase):

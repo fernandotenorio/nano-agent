@@ -13,6 +13,8 @@ from ui.base import (
     ShellDecision,
     ToolCallView,
     UsageInfo,
+    UsageProvider,
+    UsageReport,
 )
 from ui.null_ui import QuietUI
 from ui.theme import DEFAULT_THEME, UITheme
@@ -29,6 +31,7 @@ class TextualUI(UI):
     def __init__(self, theme: UITheme | None = None):
         self._theme = theme or DEFAULT_THEME
         self._app: PrismaApp | None = None
+        self._usage_provider: UsageProvider | None = None
 
     @property
     def app(self) -> PrismaApp:
@@ -39,7 +42,7 @@ class TextualUI(UI):
     # --- Lifecycle ----------------------------------------------------------
 
     async def run(self, session: SessionRunner) -> None:
-        self._app = PrismaApp(self._theme, session)
+        self._app = PrismaApp(self._theme, session, self._usage_provider)
         try:
             await self._app.run_async()
         finally:
@@ -69,6 +72,9 @@ class TextualUI(UI):
     async def usage(self, info: UsageInfo) -> None:
         self.app.add_usage(info)
 
+    async def show_usage(self, report: UsageReport) -> None:
+        self.app.open_usage(report)
+
     async def notice(self, text: str) -> None:
         await self.app.add_notice(text)
 
@@ -87,6 +93,11 @@ class TextualUI(UI):
         return await self.app.request_user_input()
 
     # --- Composition --------------------------------------------------------
+
+    def set_usage_provider(self, provider: UsageProvider) -> None:
+        # Held until `run`, which is where the application that needs it is
+        # built. Wiring happens during setup, before any of this is alive.
+        self._usage_provider = provider
 
     def for_subagent(self) -> UI:
         return QuietUI(self)

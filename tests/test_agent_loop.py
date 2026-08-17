@@ -7,14 +7,15 @@ import uuid
 
 from typedefs import (
     AssistantMessage, TextMessageContent, ToolUseMessageContent, 
-    ToolResultMessageContent, UserMessage, ToolFailure, ShellCallback,
+    ToolResultMessageContent, ToolResult, UserMessage, ToolFailure, ShellCallback,
     AgentCallback, SystemMessage
 )
 
 from hooks import PreToolUseEvent, PostToolUseEvent, UserPromptEvent
 from agent import run_agentic_loop
-from agent import execute_tool, handle_shell, handle_subagent, main
+from agent import execute_tool, handle_shell, handle_subagent, main, run_repl
 from sessioncontext import AgentPolicy, AgentMode, InvocationContext
+from ui.base import SessionInfo
 from ui.null_ui import NullUI
 
 
@@ -184,6 +185,184 @@ class TestAgenticLoopGroup1(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(user_msg, UserMessage)
         self.assertEqual(len(user_msg.content), 3)
         self.assertEqual(user_msg.content, [tr1, tr2, tr3])
+
+
+class TestLoopUsageRecording(unittest.IsolatedAsyncioTestCase):
+    """
+    Test Group 1b: Usage Recording in the Loop (run_agentic_loop)
+
+    The loop is the only place that knows which model string was asked for and
+    which tools a response called, so it is where the ledger is written. The
+    property under test throughout: one response is one entry, so a turn that
+    calls three tools does not bill the session three times.
+    """
+
+    def setUp(self):
+        self.transcript = MagicMock()
+        self.transcript.messages = []
+        self.transcript.file_path = Path("/mock/transcripts/test.jsonl")
+
+        self.registry = MagicMock()
+        self.registry.get_all_schemas.return_value = []
+
+        self.hooks = MagicMock()
+        self.policy = AgentPolicy()
+        self.policy.mode = AgentMode.BUILD
+
+        self.ctx = InvocationContext(
+            workspace=Path("/mock/workspace"),
+            cwd=Path("/mock/workspace"),
+            workspace_is_git_repo=False,
+        )
+        self.model = "ollama/gemma3:12b"
+        self.usage = {"prompt_tokens": 300, "completion_tokens": 30}
+
+    @property
+    def tracker(self):
+        return self.ctx.usage_tracker
+
+    def final(self, usage: dict | None = None) -> AssistantMessage:
+        """A closing text response, optionally carrying a usage figure."""
+        return AssistantMessage(
+            content=[TextMessageContent(text="Done.")],
+            model="gemma3:12b",
+            stop_reason="end_turn",
+            usage=usage,
+        )
+
+    async def run_loop(self):
+        return await run_agentic_loop(
+            self.transcript, self.registry, self.hooks, self.model, self.policy, self.ctx
+        )
+
+    @patch("builtins.print")
+    @patch("agent.acompletion", new_callable=AsyncMock)
+    async def test_text_turn_is_recorded_with_no_tools(self, mock_acompletion, mock_print):
+        mock_acompletion.return_value = self.final(self.usage)
+
+        await self.run_loop()
+
+        record = self.tracker.records[0]
+        self.assertEqual(record.agent, "main")
+        self.assertEqual(record.tools, ())
+        self.assertEqual(record.activities, ("text",))
+        self.assertEqual(record.total_tokens, 330)
+
+    @patch("builtins.print")
+    @patch("agent.acompletion", new_callable=AsyncMock)
+    async def test_the_requested_model_is_recorded_not_the_echoed_one(
+        self, mock_acompletion, mock_print
+    ):
+        """The response says 'gemma3:12b'; only the loop knows the provider."""
+        mock_acompletion.return_value = self.final(self.usage)
+
+        await self.run_loop()
+
+        self.assertEqual(self.tracker.records[0].model, "ollama/gemma3:12b")
+        self.assertIn("ollama", self.tracker.by_provider())
+
+    @patch("builtins.print")
+    @patch("agent.acompletion", new_callable=AsyncMock)
+    async def test_a_response_without_usage_records_nothing(self, mock_acompletion, mock_print):
+        mock_acompletion.return_value = self.final()
+
+        await self.run_loop()
+
+        self.assertEqual(self.tracker.records, [])
+
+    @patch("builtins.print")
+    @patch("agent.execute_tool", new_callable=AsyncMock)
+    @patch("agent.acompletion", new_callable=AsyncMock)
+    async def test_a_multi_tool_response_is_recorded_exactly_once(
+        self, mock_acompletion, mock_execute_tool, mock_print
+    ):
+        tool_uses = [
+            ToolUseMessageContent(id="t1", name="Read", input={}),
+            ToolUseMessageContent(id="t2", name="Grep", input={}),
+            ToolUseMessageContent(id="t3", name="ls", input={}),
+        ]
+        mock_acompletion.side_effect = [
+            AssistantMessage(
+                content=tool_uses, model="gemma3:12b", stop_reason="tool_use", usage=self.usage
+            ),
+            self.final(),
+        ]
+        mock_execute_tool.side_effect = [
+            [ToolResultMessageContent(tool_use_id=tu.id, content="ok")] for tu in tool_uses
+        ]
+
+        await self.run_loop()
+
+        self.assertEqual(len(self.tracker.records), 1)
+        self.assertEqual(self.tracker.total().total_tokens, 330)
+        self.assertEqual(self.tracker.records[0].tools, ("Read", "Grep", "ls"))
+
+    @patch("builtins.print")
+    @patch("agent.execute_tool", new_callable=AsyncMock)
+    @patch("agent.acompletion", new_callable=AsyncMock)
+    async def test_a_multi_tool_response_is_split_across_its_tools(
+        self, mock_acompletion, mock_execute_tool, mock_print
+    ):
+        tool_uses = [
+            ToolUseMessageContent(id="t1", name="Read", input={}),
+            ToolUseMessageContent(id="t2", name="Grep", input={}),
+        ]
+        mock_acompletion.side_effect = [
+            AssistantMessage(
+                content=tool_uses, model="gemma3:12b", stop_reason="tool_use", usage=self.usage
+            ),
+            self.final(),
+        ]
+        mock_execute_tool.side_effect = [
+            [ToolResultMessageContent(tool_use_id=tu.id, content="ok")] for tu in tool_uses
+        ]
+
+        await self.run_loop()
+
+        by_tool = self.tracker.by_tool()
+        self.assertEqual(by_tool["Read"].total_tokens, 165)
+        self.assertEqual(by_tool["Grep"].total_tokens, 165)
+
+    @patch("builtins.print")
+    @patch("agent.execute_tool", new_callable=AsyncMock)
+    @patch("agent.acompletion", new_callable=AsyncMock)
+    async def test_every_iteration_of_a_turn_is_recorded(
+        self, mock_acompletion, mock_execute_tool, mock_print
+    ):
+        tool_use = ToolUseMessageContent(id="t1", name="Read", input={})
+        mock_acompletion.side_effect = [
+            AssistantMessage(
+                content=[tool_use], model="gemma3:12b", stop_reason="tool_use", usage=self.usage
+            ),
+            self.final({"prompt_tokens": 100, "completion_tokens": 10}),
+        ]
+        mock_execute_tool.return_value = [
+            ToolResultMessageContent(tool_use_id="t1", content="ok")
+        ]
+
+        await self.run_loop()
+
+        self.assertEqual(len(self.tracker.records), 2)
+        self.assertEqual(self.tracker.total().total_tokens, 440)
+
+    @patch("builtins.print")
+    @patch("agent.execute_tool", new_callable=AsyncMock)
+    @patch("agent.acompletion", new_callable=AsyncMock)
+    async def test_a_sub_agent_loop_records_under_its_own_name(
+        self, mock_acompletion, mock_execute_tool, mock_print
+    ):
+        """The tracker is shared, so the agent name is what keeps them apart."""
+        sub_ctx = self.ctx.clone_for_subagent("subagent:code-reviewer")
+        mock_acompletion.return_value = self.final(self.usage)
+
+        await run_agentic_loop(
+            self.transcript, self.registry, self.hooks, self.model, self.policy, sub_ctx
+        )
+
+        self.assertIs(sub_ctx.usage_tracker, self.ctx.usage_tracker)
+        self.assertEqual(
+            self.tracker.by_agent()["subagent:code-reviewer"].total_tokens, 330
+        )
 
 
 class TestExecuteToolGroup2(unittest.IsolatedAsyncioTestCase):
@@ -368,6 +547,142 @@ class TestExecuteToolGroup2(unittest.IsolatedAsyncioTestCase):
         # Second block should be the injected text content
         self.assertIsInstance(result[1], TextMessageContent)
         self.assertEqual(result[1].text, "<system>Remember to run tests.</system>")
+
+
+class TestExecuteToolUsageStamping(unittest.IsolatedAsyncioTestCase):
+    """
+    Test Group 2b: Tool Accounting (execute_tool)
+
+    Every tool result is stamped with the name of the tool that produced it,
+    and a tool that ran an LLM of its own has that billed to it. Both are also
+    written onto the transcript, which is the only way a resumed session can
+    rebuild the same ledger.
+    """
+
+    def setUp(self):
+        self.tu = ToolUseMessageContent(id="call_999", name="WebFetch", input={"url": "x"})
+        self.transcript_path = Path("/mock/path.jsonl")
+        self.model = "ollama/gemma3:12b"
+
+        self.registry = MagicMock()
+        self.registry.invoke = AsyncMock()
+
+        self.hooks = MagicMock()
+        self.hooks.trigger_pre_tool = AsyncMock(return_value=PreToolUseEvent(
+            tool_name=self.tu.name, tool_input=self.tu.input, decision="allow"
+        ))
+        self.hooks.trigger_post_tool = AsyncMock(return_value=PostToolUseEvent(
+            tool_name=self.tu.name, tool_input=self.tu.input, tool_output=""
+        ))
+
+        self.policy = AgentPolicy()
+        self.ctx = InvocationContext(
+            workspace=Path("/mock/workspace"),
+            cwd=Path("/mock/workspace"),
+            workspace_is_git_repo=False,
+        )
+        self.usage = {"prompt_tokens": 80, "completion_tokens": 8}
+
+    async def execute(self):
+        return await execute_tool(
+            self.tu, self.registry, self.hooks, self.transcript_path,
+            self.model, self.policy, self.ctx,
+        )
+
+    @patch("builtins.print")
+    async def test_the_tool_name_is_stamped_on_the_result(self, mock_print):
+        self.registry.invoke.return_value = "Fetched."
+
+        result = await self.execute()
+
+        self.assertEqual(result[0].tool_name, "WebFetch")
+
+    @patch("builtins.print")
+    async def test_a_plain_tool_carries_no_usage(self, mock_print):
+        self.registry.invoke.return_value = "Fetched."
+
+        result = await self.execute()
+
+        self.assertIsNone(result[0].usage)
+        self.assertIsNone(result[0].internal_model)
+        self.assertEqual(self.ctx.usage_tracker.records, [])
+
+    @patch("builtins.print")
+    async def test_an_llm_run_inside_a_tool_is_billed_to_that_tool(self, mock_print):
+        self.registry.invoke.return_value = ToolResult(
+            content="Summarised.",
+            usage=self.usage,
+            internal_model="openai/gpt-4o-mini",
+        )
+
+        await self.execute()
+
+        record = self.ctx.usage_tracker.records[0]
+        self.assertTrue(record.internal)
+        self.assertEqual(record.tools, ("WebFetch",))
+        self.assertEqual(record.model, "openai/gpt-4o-mini")
+        self.assertEqual(self.ctx.usage_tracker.by_tool()["WebFetch"].total_tokens, 88)
+
+    @patch("builtins.print")
+    async def test_internal_usage_is_written_onto_the_transcript(self, mock_print):
+        self.registry.invoke.return_value = ToolResult(
+            content="Summarised.",
+            usage=self.usage,
+            internal_model="openai/gpt-4o-mini",
+        )
+
+        result = await self.execute()
+
+        self.assertEqual(result[0].usage, self.usage)
+        self.assertEqual(result[0].internal_model, "openai/gpt-4o-mini")
+
+    @patch("builtins.print")
+    async def test_usage_without_a_model_falls_back_to_the_session_model(self, mock_print):
+        """A tool that reports tokens but not which model spent them."""
+        self.registry.invoke.return_value = ToolResult(content="Summarised.", usage=self.usage)
+
+        result = await self.execute()
+
+        self.assertEqual(self.ctx.usage_tracker.records[0].model, "ollama/gemma3:12b")
+        self.assertEqual(result[0].internal_model, "ollama/gemma3:12b")
+
+    @patch("builtins.print")
+    async def test_a_failed_tool_records_nothing(self, mock_print):
+        self.registry.invoke.side_effect = ValueError("boom")
+
+        result = await self.execute()
+
+        self.assertTrue(result[0].is_error)
+        self.assertEqual(self.ctx.usage_tracker.records, [])
+
+    @patch("builtins.print")
+    async def test_a_blocked_tool_is_still_named(self, mock_print):
+        self.hooks.trigger_pre_tool.return_value = PreToolUseEvent(
+            tool_name=self.tu.name, tool_input=self.tu.input,
+            decision="deny", deny_reason="Not allowed.",
+        )
+
+        result = await self.execute()
+
+        self.assertTrue(result[0].is_error)
+        self.assertEqual(result[0].tool_name, "WebFetch")
+        self.assertEqual(self.ctx.usage_tracker.records, [])
+
+    @patch("builtins.print")
+    async def test_a_sub_agent_tool_records_under_the_sub_agent(self, mock_print):
+        sub_ctx = self.ctx.clone_for_subagent("subagent:explore")
+        self.registry.invoke.return_value = ToolResult(
+            content="Summarised.", usage=self.usage, internal_model="openai/gpt-4o-mini"
+        )
+
+        await execute_tool(
+            self.tu, self.registry, self.hooks, self.transcript_path,
+            self.model, self.policy, sub_ctx,
+        )
+
+        self.assertEqual(
+            self.ctx.usage_tracker.by_agent()["subagent:explore"].total_tokens, 88
+        )
 
 
 class TestHandleShellGroup3(unittest.IsolatedAsyncioTestCase):
@@ -738,6 +1053,12 @@ class TestHandleSubagentGroup4(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sub_ctx.file_state.known, {})
         self.assertEqual(sub_ctx.workspace, self.ctx.workspace)
 
+        # 4. Usage accounting is the exception to that isolation: the ledger is
+        # shared so the session sees one total, and the name keeps the
+        # sub-agent's share tellable apart.
+        self.assertEqual(sub_ctx.agent_name, "subagent:code-reviewer")
+        self.assertIs(sub_ctx.usage_tracker, self.ctx.usage_tracker)
+
         # The registry was built from the sub-agent's context, not the parent's
         mock_create_registry.assert_called_once_with(sub_ctx)
 
@@ -810,6 +1131,149 @@ class MockTranscriptState:
         self.messages = []
     def append(self, msg):
         self.messages.append(msg)
+
+class RecordingUI(NullUI):
+    """Replays a scripted conversation and keeps what the REPL rendered."""
+
+    def __init__(self, inputs: list[str]):
+        self.inputs = list(inputs)
+        self.reports: list = []
+        self.usage_updates: list = []
+
+    async def read_user_input(self) -> str:
+        return self.inputs.pop(0)
+
+    async def show_usage(self, report) -> None:
+        self.reports.append(report)
+
+    async def usage(self, info) -> None:
+        self.usage_updates.append(info)
+
+
+class TestReplUsageCommands(unittest.IsolatedAsyncioTestCase):
+    """
+    Test Group 5b: Usage in the REPL (run_repl)
+
+    /usage is the front-end-agnostic way in: the Textual app has a key binding
+    and a button, but a plain terminal has only what it can type.
+    """
+
+    def setUp(self):
+        self.transcript = MagicMock()
+        self.transcript.messages = []
+        self.transcript.file_path = Path("/mock/transcripts/test.jsonl")
+
+        self.registry = MagicMock()
+        self.hooks = MagicMock()
+        self.hooks.trigger_user_prompt = AsyncMock(
+            side_effect=lambda prompt, is_first_prompt=True: UserPromptEvent(
+                prompt=prompt, is_first_prompt=is_first_prompt
+            )
+        )
+
+        self.policy = AgentPolicy()
+        self.ctx = InvocationContext(
+            workspace=Path("/mock/workspace"),
+            cwd=Path("/mock/workspace"),
+            workspace_is_git_repo=False,
+        )
+        self.info = SessionInfo(
+            app_name="Prisma",
+            model="ollama/gemma3:12b",
+            mode="BUILD",
+            workspace=self.ctx.workspace,
+            cwd=self.ctx.cwd,
+            transcript_path=self.transcript.file_path,
+            provider="ollama",
+        )
+
+    async def run_repl_with(self, ui: RecordingUI) -> None:
+        await run_repl(
+            ui, self.info, self.transcript, self.registry,
+            self.hooks, self.policy, self.ctx, "ollama/gemma3:12b",
+        )
+
+    def spend(self, prompt: int = 100, completion: int = 10) -> None:
+        self.ctx.usage_tracker.record_turn(
+            "main", "ollama/gemma3:12b", (),
+            {"prompt_tokens": prompt, "completion_tokens": completion},
+        )
+
+    @patch("builtins.print")
+    @patch("agent.run_agentic_loop", new_callable=AsyncMock)
+    async def test_usage_command_renders_a_report(self, mock_run_loop, mock_print):
+        self.spend()
+        ui = RecordingUI(["/usage", "/quit"])
+
+        await self.run_repl_with(ui)
+
+        self.assertEqual(len(ui.reports), 1)
+        self.assertEqual(ui.reports[0].totals.total_tokens, 110)
+
+    @patch("builtins.print")
+    @patch("agent.run_agentic_loop", new_callable=AsyncMock)
+    async def test_usage_command_alone_does_not_prompt_the_model(
+        self, mock_run_loop, mock_print
+    ):
+        ui = RecordingUI(["/usage", "/quit"])
+
+        await self.run_repl_with(ui)
+
+        mock_run_loop.assert_not_called()
+
+    @patch("builtins.print")
+    @patch("agent.run_agentic_loop", new_callable=AsyncMock)
+    async def test_usage_command_reflects_the_latest_spend(self, mock_run_loop, mock_print):
+        """The report is built when asked for, so it is never a stale snapshot."""
+        ui = RecordingUI(["/usage", "/usage", "/quit"])
+
+        async def spend_then_return(*args, **kwargs):
+            self.spend()
+            return []
+
+        mock_run_loop.side_effect = spend_then_return
+        self.spend()
+
+        await self.run_repl_with(ui)
+
+        self.assertEqual(ui.reports[0].totals.total_tokens, 110)
+        self.assertEqual(ui.reports[1].totals.total_tokens, 110)
+
+    @patch("builtins.print")
+    @patch("agent.run_agentic_loop", new_callable=AsyncMock)
+    async def test_text_after_the_command_still_reaches_the_model(
+        self, mock_run_loop, mock_print
+    ):
+        mock_run_loop.return_value = []
+        ui = RecordingUI(["/usage now read main.py", "/quit"])
+
+        await self.run_repl_with(ui)
+
+        self.assertEqual(len(ui.reports), 1)
+        mock_run_loop.assert_called_once()
+
+    @patch("builtins.print")
+    @patch("agent.run_agentic_loop", new_callable=AsyncMock)
+    async def test_a_resumed_session_seeds_the_running_total(self, mock_run_loop, mock_print):
+        """Otherwise the status bar reads zero while the usage view reads the truth."""
+        self.spend(prompt=1000, completion=100)
+        ui = RecordingUI(["/quit"])
+
+        await self.run_repl_with(ui)
+
+        self.assertEqual(len(ui.usage_updates), 1)
+        self.assertEqual(ui.usage_updates[0].input_tokens, 1000)
+        self.assertEqual(ui.usage_updates[0].output_tokens, 100)
+
+    @patch("builtins.print")
+    @patch("agent.run_agentic_loop", new_callable=AsyncMock)
+    async def test_a_fresh_session_seeds_nothing(self, mock_run_loop, mock_print):
+        ui = RecordingUI(["/quit"])
+
+        await self.run_repl_with(ui)
+
+        self.assertEqual(ui.usage_updates, [])
+
 
 class TestMainLoopGroup5(unittest.IsolatedAsyncioTestCase):
     """

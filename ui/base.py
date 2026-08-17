@@ -92,6 +92,49 @@ class UsageInfo:
 
 
 @dataclass(frozen=True)
+class UsageRow:
+    """One labelled bucket of tokens in the usage view."""
+    label: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
+    calls: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+
+@dataclass(frozen=True)
+class UsageSection:
+    """One table in the usage view.
+
+    `note` carries a caveat about how the rows were derived, for the sections
+    whose numbers cannot be read as plain sums.
+    """
+    title: str
+    rows: tuple[UsageRow, ...] = ()
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class UsageReport:
+    """The whole usage view: already aggregated, ordered, and ready to render."""
+    sections: tuple[UsageSection, ...] = ()
+    totals: UsageRow = UsageRow(label="Total")
+
+    @property
+    def is_empty(self) -> bool:
+        return self.totals.calls == 0
+
+
+# Builds a report reflecting usage *at the moment it is called*. Front-ends
+# that offer usage through their own chrome hold one of these rather than a
+# snapshot, which would be stale by the time the user asks.
+UsageProvider = Callable[[], UsageReport]
+
+
+@dataclass(frozen=True)
 class ShellDecision:
     """User's answer to a shell-command confirmation prompt."""
     approved: bool
@@ -173,6 +216,10 @@ class UI(ABC):
         """Reports the token usage of one model response."""
 
     @abstractmethod
+    async def show_usage(self, report: UsageReport) -> None:
+        """Renders the session's token usage breakdown."""
+
+    @abstractmethod
     async def notice(self, text: str) -> None:
         """Renders a low-priority informational message."""
 
@@ -195,6 +242,14 @@ class UI(ABC):
         """Reads the next user prompt (the REPL input line)."""
 
     # --- Composition --------------------------------------------------------
+
+    def set_usage_provider(self, provider: UsageProvider) -> None:
+        """Supplies a way to build a usage report on demand.
+
+        Only front-ends that reach for usage on their own (a key binding, a
+        button on the status bar) need this; one that merely renders what the
+        session hands it can ignore the provider entirely.
+        """
 
     @abstractmethod
     def for_subagent(self) -> "UI":

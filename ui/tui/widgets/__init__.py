@@ -8,9 +8,10 @@ from ui.tui.widgets.blocks import (
     SessionBanner,
     ToolBlock,
 )
-from ui.tui.widgets.chrome import FooterBar, HeaderBar
+from ui.tui.widgets.chrome import FooterBar, HeaderBar, UsageButton
 from ui.tui.widgets.prompt import PromptArea, PromptInput
 from ui.tui.widgets.spinner import SpinnerLine
+from ui.tui.widgets.usage import UsageScreen
 
 __all__ = [
     "FooterBar",
@@ -25,4 +26,6 @@ __all__ = [
     "ShellApprovalBlock",
     "SpinnerLine",
     "ToolBlock",
+    "UsageButton",
+    "UsageScreen",
 ]

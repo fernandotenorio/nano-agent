@@ -19,6 +19,7 @@ from textual.widgets.option_list import Option
 SLASH_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/plan", "Investigate and propose a plan before changing anything"),
     ("/build", "Full access to write and shell tools"),
+    ("/usage", "Show token usage for this session (Ctrl+U)"),
     ("/quit", "End the session"),
     ("/exit", "End the session"),
 )

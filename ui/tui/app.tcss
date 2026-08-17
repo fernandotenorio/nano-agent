@@ -19,6 +19,24 @@ Screen {
     color: $prisma-footer-text;
 }
 
+#footer-info {
+    width: 1fr;
+    height: 1;
+}
+
+#footer-usage {
+    width: auto;
+    height: 1;
+    padding: 0 1;
+    text-style: bold;
+    color: $prisma-tool-accent;
+}
+
+#footer-usage:hover {
+    background: $prisma-input-bg;
+    color: $prisma-input-border;
+}
+
 #transcript {
     height: 1fr;
     padding: 0 1;
@@ -276,5 +294,71 @@ Markdown > MarkdownParagraph:last-of-type {
     width: 1fr;
     height: 1;
     margin: 1 0 0 0;
+    color: $text-muted;
+}
+
+/* --- Usage view ---------------------------------------------------------- */
+
+UsageScreen {
+    align: center middle;
+    background: $background 60%;
+}
+
+#usage-dialog {
+    width: 90%;
+    max-width: 100;
+    height: auto;
+    max-height: 80%;
+    padding: 1 2;
+    background: $surface;
+    border: round $prisma-tool-accent;
+}
+
+#usage-title {
+    width: 1fr;
+    height: 1;
+    text-style: bold;
+    color: $prisma-user-accent;
+}
+
+#usage-totals {
+    width: 1fr;
+    height: auto;
+    margin-bottom: 1;
+    color: $prisma-tool-success;
+}
+
+#usage-sections {
+    width: 1fr;
+    height: auto;
+    max-height: 30;
+    scrollbar-size-vertical: 1;
+}
+
+.usage-table {
+    width: 1fr;
+    height: auto;
+    max-height: 20;
+    margin-bottom: 1;
+    background: transparent;
+}
+
+.usage-note {
+    width: 1fr;
+    height: auto;
+    margin-bottom: 1;
+    color: $text-muted;
+}
+
+.usage-empty {
+    width: 1fr;
+    height: auto;
+    margin: 1 0;
+    color: $text-muted;
+}
+
+#usage-hint {
+    width: 1fr;
+    height: 1;
     color: $text-muted;
 }

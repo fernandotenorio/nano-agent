@@ -28,6 +28,14 @@ class ToolResultMessageContent(pydantic.BaseModel):
     content: str | list[TextMessageContent]
     is_error: bool = False
 
+    # Accounting for an LLM the tool ran inside its own implementation. Carried
+    # on the transcript rather than only in memory so that a resumed session
+    # can rebuild the same usage ledger. All optional: transcripts written
+    # before this existed must still load.
+    tool_name: str | None = None
+    usage: dict[str, Any] | None = None
+    internal_model: str | None = None
+
 class ToolFailure(pydantic.BaseModel):
     """Returned by a tool to explicitly signal an error state to the agent loop."""
     error_message: str
@@ -38,6 +46,11 @@ class ToolResult(pydantic.BaseModel):
     summary for the terminal UI (e.g. 'Read src/agent.py (487 lines)')."""
     content: str | list[TextMessageContent]
     ui_summary: str | None = None
+
+    # Set by a tool that called an LLM of its own, so the loop can bill those
+    # tokens to the tool rather than losing them.
+    usage: dict[str, Any] | None = None
+    internal_model: str | None = None
 
 # ---------------------------------------------------------
 # Messages
@@ -60,6 +73,12 @@ class AssistantMessage(pydantic.BaseModel):
     stop_reason: str | None = None
     stop_sequence: str | None = None
     usage: dict[str, Any] | None = None
+
+    # What the session asked for ("ollama/gemma3:12b"), as opposed to `model`,
+    # which is whatever the provider echoed back ("gemma3:12b"). Usage is keyed
+    # on this so a resumed transcript groups with a live one, and so the
+    # provider can still be read off the string.
+    request_model: str | None = None
 
 
 # A helpful alias for the Transcript

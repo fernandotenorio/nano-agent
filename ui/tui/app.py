@@ -16,11 +16,21 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator, Literal
 
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.css.query import NoMatches
 from textual.widget import Widget
 
-from ui.base import PlanDecision, SessionInfo, SessionRunner, ShellDecision, ToolCallView, UsageInfo
+from ui.base import (
+    PlanDecision,
+    SessionInfo,
+    SessionRunner,
+    ShellDecision,
+    ToolCallView,
+    UsageInfo,
+    UsageProvider,
+    UsageReport,
+)
 from ui.theme import UITheme, css_variables
 from ui.tui.widgets import (
     FooterBar,
@@ -34,6 +44,7 @@ from ui.tui.widgets import (
     ShellApprovalBlock,
     SpinnerLine,
     ToolBlock,
+    UsageScreen,
 )
 
 InputMode = Literal["locked", "prompt", "reason"]
@@ -47,13 +58,25 @@ class PrismaApp(App[None]):
 
     CSS_PATH = "app.tcss"
 
-    def __init__(self, theme: UITheme, session: SessionRunner) -> None:
+    # The prompt is a TextArea, which binds Ctrl+U itself and normally holds
+    # focus, so this has to outrank the focused widget to be reachable at all.
+    BINDINGS = [
+        Binding("ctrl+u", "show_usage", "Usage", priority=True),
+    ]
+
+    def __init__(
+        self,
+        theme: UITheme,
+        session: SessionRunner,
+        usage_provider: UsageProvider | None = None,
+    ) -> None:
         # Assigned before App.__init__, which reads the CSS variables while
         # building the stylesheet.
         self.ui_theme = theme
 
         super().__init__()
         self._session = session
+        self._usage_provider = usage_provider
         self._input_queue: asyncio.Queue[str] = asyncio.Queue()
         self._input_mode: InputMode = "locked"
         self._spinner: SpinnerLine | None = None
@@ -147,6 +170,22 @@ class PrismaApp(App[None]):
 
     async def add_tool_result(self, call: ToolCallView) -> None:
         await self._append(ToolBlock(self.ui_theme.tool, call))
+
+    def open_usage(self, report: UsageReport) -> None:
+        """Shows the usage view; asking again refreshes it rather than stacking."""
+        if isinstance(self.screen, UsageScreen):
+            self.pop_screen()
+
+        self.push_screen(UsageScreen(report))
+
+    def action_show_usage(self) -> None:
+        """Ctrl+U, and the footer button.
+
+        Does nothing without a provider, which is the case in tests and in any
+        embedding that never wired one up.
+        """
+        if self._usage_provider is not None:
+            self.open_usage(self._usage_provider())
 
     async def add_notice(self, text: str) -> None:
         await self._append(NoticeBlock(text))

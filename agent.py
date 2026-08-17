@@ -37,6 +37,12 @@ from tools.core import create_core_registry
 from ui.base import UI, SessionInfo, ToolCallView, UsageInfo, split_model
 from ui.null_ui import NullUI
 from ui.summaries import summarize_call
+from usagetracker import (
+    SessionUsageTracker,
+    build_report,
+    rehydrate_session_usage,
+    subagent_name,
+)
 
 
 load_dotenv(".env.development")
@@ -193,7 +199,7 @@ async def handle_subagent(
     # 1. Isolated context: a fresh, empty file-state tracker. The sub-agent
     # must Read files itself before writing them; it never inherits the
     # parent's read history (and vice versa).
-    sub_ctx = ctx.clone_for_subagent()
+    sub_ctx = ctx.clone_for_subagent(subagent_name(callback.subagent_type))
 
     # 2. Isolated registry whose tool closures are bound to the sub-agent's context.
     # Sub-agents never get Task (no unbounded recursion) or SubmitPlan (no
@@ -290,7 +296,8 @@ async def execute_tool(
         return [ToolResultMessageContent(
             tool_use_id=tu.id,
             content=f"Tool blocked: {pre_event.deny_reason}",
-            is_error=True
+            is_error=True,
+            tool_name=tu.name,
         )]
 
     # 2. Invoke Tool with Error Boundaries
@@ -361,11 +368,30 @@ async def execute_tool(
     ))
 
     # 3. Format Base Result
+    #
+    # A tool that ran an LLM of its own reports what that cost. It is recorded
+    # against the tool here and also written onto the transcript block, so a
+    # resumed session can rebuild the same ledger.
+    reports_usage = not is_error and isinstance(raw_result, ToolResult)
+    internal_usage = raw_result.usage if reports_usage else None
+    internal_model = raw_result.internal_model if reports_usage else None
+
+    if internal_usage:
+        ctx.usage_tracker.record_tool_internal(
+            agent=ctx.agent_name,
+            model=internal_model or model,
+            tool=tu.name,
+            usage=internal_usage,
+        )
+
     content: list[TextMessageContent | ToolResultMessageContent] = [
         ToolResultMessageContent(
             tool_use_id=tu.id,                
             content=result_output,
-            is_error=is_error
+            is_error=is_error,
+            tool_name=tu.name,
+            usage=internal_usage,
+            internal_model=internal_model or (model if internal_usage else None),
         )
     ]
 
@@ -411,6 +437,16 @@ async def run_agentic_loop(
         texts = [c for c in response.content if getattr(c, "type", None) == "text"]
         tool_uses = [c for c in response.content if getattr(c, "type", None) == "tool_use"]
         thinkings = [c for c in response.content if getattr(c, "type", None) == "thinking"]
+
+        # One response, one ledger entry, however many tools it asked for: the
+        # tokens bought the whole turn. The tool names travel with the entry so
+        # the per-tool view can apportion them later.
+        ctx.usage_tracker.record_turn(
+            agent=ctx.agent_name,
+            model=model,
+            tools=[tu.name for tu in tool_uses],
+            usage=response.usage,
+        )
 
         # Reasoning blocks are collapsed into a single subtle line
         if thinkings:
@@ -508,6 +544,16 @@ async def run_repl(
     """
     await ui.session_start(info)
 
+    # A resumed session starts with tokens already spent. Handing them to the
+    # UI once keeps the running total in the status bar agreeing with the
+    # usage view, which counts the whole conversation.
+    resumed = ctx.usage_tracker.total()
+    if resumed.calls:
+        await ui.usage(UsageInfo(
+            input_tokens=resumed.input_tokens,
+            output_tokens=resumed.output_tokens,
+        ))
+
     while True:
         try:
             user_input = await ui.read_user_input()
@@ -517,7 +563,13 @@ async def run_repl(
             # Intercept Mode Commands
             user_input_lower = user_input.strip().lower()
 
-            if user_input_lower.startswith("/plan"):
+            if user_input_lower.startswith("/usage"):
+                await ui.show_usage(build_report(ctx.usage_tracker))
+                user_input = user_input[len("/usage"):].strip()
+
+                if not user_input:
+                    continue
+            elif user_input_lower.startswith("/plan"):
                 policy.mode = AgentMode.PLAN
                 await ui.mode_changed("PLAN")
                 user_input = user_input[len("/plan"):].strip()
@@ -638,6 +690,13 @@ async def main():
     # registered below, and what the startup banner and system prompt warn about.
     capabilities = probe_capabilities(root_dir)
 
+    # Resuming continues the previous session's accounting rather than
+    # restarting it, so the totals on screen cover the whole conversation and
+    # not just the part of it that happened since the last launch.
+    usage_tracker = (
+        rehydrate_session_usage(transcript_file) if args.resume else SessionUsageTracker()
+    )
+
     # 1. Create the context
     ctx = InvocationContext(
         workspace=root_dir,
@@ -645,6 +704,7 @@ async def main():
         workspace_is_git_repo = (root_dir / ".git").exists(),
         resume_file=Path(args.resume) if args.resume else None,
         capabilities=capabilities,
+        usage_tracker=usage_tracker,
     )
     
     # Initialize State
@@ -667,6 +727,10 @@ async def main():
     hooks.register_user_prompt(bound_file_changes_hook)
 
     ui = create_ui(args.ui, app_config, cwd)
+
+    # A front-end with its own way in to the usage view (a key binding, a
+    # button) needs to build the report at the moment it is asked for.
+    ui.set_usage_provider(lambda: build_report(ctx.usage_tracker))
 
     # Safety gate: every Shell command requires explicit user confirmation
     hooks.register_pre_tool(partial(shell_confirmation_hook, ui=ui))

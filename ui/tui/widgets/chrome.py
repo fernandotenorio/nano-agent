@@ -3,9 +3,14 @@
 
 from __future__ import annotations
 
+from textual.app import ComposeResult
+from textual.containers import Horizontal
+from textual.css.query import NoMatches
 from textual.widgets import Static
 
 from ui.base import SessionInfo, UsageInfo, split_model
+
+USAGE_LABEL = "Usage ^U"
 
 
 def _shorten(path, root) -> str:
@@ -48,15 +53,33 @@ class HeaderBar(Static):
         self.update("  ".join(parts))
 
 
-class FooterBar(Static):
-    """Who is answering, and what it has cost so far."""
+class UsageButton(Static):
+    """The way into the usage breakdown for anyone not reaching for Ctrl+U."""
 
     def __init__(self) -> None:
-        super().__init__("", id="footer", markup=False)
+        super().__init__(USAGE_LABEL, id="footer-usage", markup=False)
+
+    def on_click(self) -> None:
+        self.app.action_show_usage()
+
+
+class FooterBar(Horizontal):
+    """Who is answering, what it has cost so far, and a way to see the detail.
+
+    The running total stays here because it is the number worth glancing at
+    between turns; everything behind it lives one keypress away.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(id="footer")
         self._provider = ""
         self._model = ""
         self._input_tokens = 0
         self._output_tokens = 0
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="footer-info", markup=False)
+        yield UsageButton()
 
     def show_session(self, info: SessionInfo) -> None:
         # The provider already names the service, so the model is shown bare:
@@ -71,10 +94,17 @@ class FooterBar(Static):
         self._redraw()
 
     def _redraw(self) -> None:
+        # The label is a child, so it can be absent while the bar is being
+        # composed or torn down. Nothing here is worth an exception.
+        try:
+            label = self.query_one("#footer-info", Static)
+        except NoMatches:
+            return
+
         parts = [part for part in (self._provider, self._model) if part]
 
         total = self._input_tokens + self._output_tokens
         if total:
             parts.append(f"{total:,} tokens ({self._input_tokens:,} in / {self._output_tokens:,} out)")
 
-        self.update("  ".join(parts))
+        label.update("  ".join(parts))

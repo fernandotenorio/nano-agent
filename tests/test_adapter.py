@@ -389,6 +389,21 @@ class TestAdapterLLM(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tools", called_kwargs)
         self.assertIn("user", called_kwargs) # OpenAI Prompt Cache Key
 
+    @patch("litellm.acompletion", new_callable=AsyncMock)
+    async def test_the_requested_model_is_stamped_on_the_response(self, mock_litellm):
+        """
+        Providers echo their own name back, usually without the prefix, so the
+        only record of what was asked for is made here. Usage is keyed on it.
+        """
+        mock_litellm.return_value = ModelResponse(
+            model="gemma3:12b", choices=[Choices(message=Message(content="hi"))]
+        )
+
+        response = await acompletion("ollama/gemma3:12b", tools=[], messages=[])
+
+        self.assertEqual(response.request_model, "ollama/gemma3:12b")
+        self.assertEqual(response.model, "gemma3:12b")
+
     # NOTE: The old adapter-level spinner was removed. Progress indication now
     # lives in the UI layer (ui/rich_ui.py) and is exercised by the agent loop.
 

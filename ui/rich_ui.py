@@ -25,6 +25,7 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.status import Status
+from rich.table import Table
 from rich.text import Text
 
 from ui.base import (
@@ -35,8 +36,12 @@ from ui.base import (
     ShellDecision,
     ToolCallView,
     UsageInfo,
+    UsageReport,
+    UsageSection,
 )
 from ui.null_ui import QuietUI
+
+USAGE_EMPTY_MESSAGE = "No model usage recorded yet."
 
 
 class _ElapsedText:
@@ -141,6 +146,47 @@ class RichUI(UI):
         # A scrolling log has no status bar to park a running total in, and a
         # token count after every response would drown out the conversation.
         pass
+
+    async def show_usage(self, report: UsageReport) -> None:
+        self._pause_status()
+        try:
+            self._console.print()
+
+            if report.is_empty:
+                self._console.print(f"[dim]{escape(USAGE_EMPTY_MESSAGE)}[/dim]")
+                return
+
+            totals = report.totals
+            self._console.print(
+                f"[bold]Token usage[/bold] [dim]{totals.total_tokens:,} tokens across "
+                f"{totals.calls:,} model call{'' if totals.calls == 1 else 's'}[/dim]"
+            )
+
+            for section in report.sections:
+                self._console.print(self._usage_table(section))
+                if section.note:
+                    self._console.print(f"[dim]{escape(section.note)}[/dim]")
+        finally:
+            self._resume_status()
+
+    def _usage_table(self, section: UsageSection) -> Table:
+        table = Table(box=self._box, expand=False, title_justify="left")
+        table.add_column(section.title, style="bold")
+
+        for name in ("Input", "Output", "Cached", "Total", "Calls"):
+            table.add_column(name, justify="right")
+
+        for row in section.rows:
+            table.add_row(
+                row.label,
+                f"{row.input_tokens:,}",
+                f"{row.output_tokens:,}",
+                f"{row.cached_tokens:,}",
+                f"{row.total_tokens:,}",
+                f"{row.calls:,}",
+            )
+
+        return table
 
     async def notice(self, text: str) -> None:
         self._console.print(f"[dim]{escape(text)}[/dim]")

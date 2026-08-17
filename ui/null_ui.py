@@ -21,6 +21,7 @@ from ui.base import (
     ShellDecision,
     ToolCallView,
     UsageInfo,
+    UsageReport,
 )
 
 
@@ -50,6 +51,9 @@ class NullUI(UI):
         pass
 
     async def usage(self, info: UsageInfo) -> None:
+        pass
+
+    async def show_usage(self, report: UsageReport) -> None:
         pass
 
     async def notice(self, text: str) -> None:

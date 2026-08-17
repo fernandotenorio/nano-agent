@@ -6,7 +6,8 @@ from pathlib import Path
 from transcript import Transcript
 from typedefs import (
     SystemMessage, UserMessage, AssistantMessage, 
-    TextMessageContent, ThinkingMessageContent, ToolUseMessageContent
+    TextMessageContent, ThinkingMessageContent, ToolUseMessageContent,
+    ToolResultMessageContent
 )
 
 class TestTranscript(unittest.TestCase):
@@ -186,6 +187,65 @@ class TestTranscript(unittest.TestCase):
         # Verify the dict args translated cleanly
         expected_input = {"path": "main.py", "lines": [1, 2]}
         self.assertEqual(loaded_msg.content[2].input, expected_input)
+
+    def test_usage_accounting_survives_the_round_trip(self):
+        """
+        Test 3.2: The fields a resumed session rebuilds its token ledger from
+        (the requested model, the tool behind a result, and any LLM a tool ran
+        itself) come back off disk intact.
+        """
+        target_path = self.base_path / "usage.jsonl"
+        usage = {"prompt_tokens": 200, "completion_tokens": 20}
+
+        transcript_a = Transcript(target_path)
+        transcript_a.append(AssistantMessage(
+            id="req_1",
+            model="gemma3:12b",
+            request_model="ollama/gemma3:12b",
+            usage=usage,
+            content=[ToolUseMessageContent(id="call_x", name="WebFetch", input={})],
+        ))
+        transcript_a.append(UserMessage(content=[ToolResultMessageContent(
+            tool_use_id="call_x",
+            content="Summarised.",
+            tool_name="WebFetch",
+            usage={"prompt_tokens": 80, "completion_tokens": 8},
+            internal_model="openai/gpt-4o-mini",
+        )]))
+
+        transcript_b = Transcript(target_path)
+        assistant, user = transcript_b.messages
+
+        self.assertEqual(assistant.request_model, "ollama/gemma3:12b")
+        self.assertEqual(assistant.model, "gemma3:12b")
+        self.assertEqual(assistant.usage, usage)
+
+        result = user.content[0]
+        self.assertIsInstance(result, ToolResultMessageContent)
+        self.assertEqual(result.tool_name, "WebFetch")
+        self.assertEqual(result.internal_model, "openai/gpt-4o-mini")
+        self.assertEqual(result.usage, {"prompt_tokens": 80, "completion_tokens": 8})
+
+    def test_transcripts_predating_usage_accounting_still_load(self):
+        """
+        Test 3.3: The new accounting fields are all optional, so a transcript
+        written before they existed opens without complaint.
+        """
+        target_path = self.base_path / "legacy.jsonl"
+        target_path.write_text(
+            '{"role": "assistant", "id": "1", "type": "message", '
+            '"content": [{"type": "text", "text": "Hi"}], "model": "gemma3:12b"}\n'
+            '{"role": "user", "content": [{"type": "tool_result", '
+            '"tool_use_id": "call_x", "content": "ok"}]}\n',
+            encoding="utf-8",
+        )
+
+        assistant, user = Transcript(target_path).messages
+
+        self.assertIsNone(assistant.request_model)
+        self.assertIsNone(user.content[0].tool_name)
+        self.assertIsNone(user.content[0].usage)
+        self.assertIsNone(user.content[0].internal_model)
 
 
 if __name__ == "__main__":
