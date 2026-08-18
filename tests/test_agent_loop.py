@@ -15,8 +15,8 @@ from hooks import PreToolUseEvent, PostToolUseEvent, UserPromptEvent
 from agent import run_agentic_loop
 from agent import execute_tool, handle_shell, handle_subagent, main, run_repl
 from sessioncontext import AgentPolicy, AgentMode, InvocationContext
-from ui.base import SessionInfo
-from ui.null_ui import NullUI
+from ui.base import SessionInfo, UsageInfo
+from ui.null_ui import NullUI, QuietUI
 
 
 class StubREPLUI(NullUI):
@@ -24,6 +24,37 @@ class StubREPLUI(NullUI):
     so the existing @patch('builtins.input') plumbing keeps driving main()."""
     async def read_user_input(self) -> str:
         return input()
+
+
+class RecordingUI(NullUI):
+    """Replays a scripted conversation and keeps what the session rendered.
+
+    `for_subagent` wraps itself the way the real front-ends do, rather than
+    inheriting NullUI's silent self, so tests take the path a live session
+    takes into a sub-agent.
+    """
+
+    def __init__(self, inputs: list[str] | None = None):
+        self.inputs = list(inputs or ())
+        self.reports: list = []
+        self.usage_updates: list[UsageInfo] = []
+
+    async def read_user_input(self) -> str:
+        return self.inputs.pop(0)
+
+    async def show_usage(self, report) -> None:
+        self.reports.append(report)
+
+    async def usage(self, info) -> None:
+        self.usage_updates.append(info)
+
+    def for_subagent(self) -> NullUI:
+        return QuietUI(self)
+
+    @property
+    def reported_tokens(self) -> int:
+        """The running total a status bar would be showing by now."""
+        return sum(info.total_tokens for info in self.usage_updates)
 
 
 class TestAgenticLoopGroup1(unittest.IsolatedAsyncioTestCase):
@@ -583,10 +614,10 @@ class TestExecuteToolUsageStamping(unittest.IsolatedAsyncioTestCase):
         )
         self.usage = {"prompt_tokens": 80, "completion_tokens": 8}
 
-    async def execute(self):
+    async def execute(self, ui=None):
         return await execute_tool(
             self.tu, self.registry, self.hooks, self.transcript_path,
-            self.model, self.policy, self.ctx,
+            self.model, self.policy, self.ctx, ui=ui or NullUI(),
         )
 
     @patch("builtins.print")
@@ -645,6 +676,31 @@ class TestExecuteToolUsageStamping(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.ctx.usage_tracker.records[0].model, "ollama/gemma3:12b")
         self.assertEqual(result[0].internal_model, "ollama/gemma3:12b")
+
+    @patch("builtins.print")
+    async def test_an_llm_run_inside_a_tool_reaches_the_running_total(self, mock_print):
+        """Anything the ledger counts, the status bar has to count too, or the
+        two only agree again after a --resume."""
+        self.registry.invoke.return_value = ToolResult(
+            content="Summarised.",
+            usage=self.usage,
+            internal_model="openai/gpt-4o-mini",
+        )
+        ui = RecordingUI()
+
+        await self.execute(ui)
+
+        self.assertEqual(ui.reported_tokens, 88)
+        self.assertEqual(ui.reported_tokens, self.ctx.usage_tracker.total().total_tokens)
+
+    @patch("builtins.print")
+    async def test_a_plain_tool_moves_nothing(self, mock_print):
+        self.registry.invoke.return_value = "Fetched."
+        ui = RecordingUI()
+
+        await self.execute(ui)
+
+        self.assertEqual(ui.usage_updates, [])
 
     @patch("builtins.print")
     async def test_a_failed_tool_records_nothing(self, mock_print):
@@ -1124,6 +1180,175 @@ class TestHandleSubagentGroup4(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(called_registry, self.excluded_registry)
 
 
+class TestSubagentLiveUsage(unittest.IsolatedAsyncioTestCase):
+    """
+    Test Group 4b: Live Token Accounting Across a Sub-Agent (handle_subagent)
+
+    A sub-agent's turns are hidden behind one spinner on purpose, but the
+    tokens they cost are the session's tokens. The running total therefore has
+    to move while the sub-agent works. It used not to: the quiet UI swallowed
+    the sub-agent's usage reports, so the status bar stayed short until a
+    --resume rebuilt the ledger from the transcripts on disk.
+
+    Unlike Group 4 above, these run the real agentic loop so that the usage
+    actually flows; only the model call, the transcript, and the registry are
+    stubbed.
+    """
+
+    def setUp(self):
+        self.parent_path = Path("/mock/dir/parent_transcript.jsonl")
+        self.model = "ollama/gemma3:12b"
+        self.ctx = InvocationContext(
+            workspace=Path("/mock/workspace"),
+            cwd=Path("/mock/workspace"),
+            workspace_is_git_repo=False,
+        )
+
+        # Keep the built-in setup hook off the real filesystem.
+        self.gather_patcher = patch("hooks.gather_context_files", return_value="")
+        self.gather_patcher.start()
+        self.addCleanup(self.gather_patcher.stop)
+
+    @property
+    def callback(self) -> AgentCallback:
+        return AgentCallback(
+            subagent_type="code-reviewer",
+            callback_description="Review this code.",
+            tools=None,
+            system_content="You are a strict reviewer.",
+            user_content="Here is the code to review.",
+        )
+
+    def registry(self) -> MagicMock:
+        """A registry that survives clone_excluding and answers any tool call."""
+        registry = MagicMock()
+        registry.clone_excluding.return_value = registry
+        registry.get_all_schemas.return_value = []
+        registry.invoke = AsyncMock(return_value="ok")
+        return registry
+
+    def response(self, usage: dict | None = None, tool: str | None = None) -> AssistantMessage:
+        content = (
+            [ToolUseMessageContent(id="t1", name=tool, input={})] if tool
+            else [TextMessageContent(text="Reviewed.")]
+        )
+        return AssistantMessage(
+            content=content,
+            model="gemma3:12b",
+            stop_reason="tool_use" if tool else "end_turn",
+            usage=usage,
+        )
+
+    async def run_subagent(self, ui: RecordingUI) -> None:
+        await handle_subagent(self.callback, self.ctx, self.parent_path, self.model, ui=ui)
+
+    @patch("builtins.print")
+    @patch("agent.create_core_registry")
+    @patch("agent.Transcript")
+    @patch("agent.acompletion", new_callable=AsyncMock)
+    async def test_a_sub_agents_tokens_reach_the_running_total(
+        self, mock_acompletion, mock_transcript_cls, mock_create_registry, mock_print
+    ):
+        mock_create_registry.return_value = self.registry()
+        mock_acompletion.return_value = self.response(
+            usage={"prompt_tokens": 200, "completion_tokens": 20}
+        )
+        ui = RecordingUI()
+
+        await self.run_subagent(ui)
+
+        self.assertEqual(len(ui.usage_updates), 1)
+        self.assertEqual(ui.usage_updates[0].input_tokens, 200)
+        self.assertEqual(ui.usage_updates[0].output_tokens, 20)
+
+    @patch("builtins.print")
+    @patch("agent.create_core_registry")
+    @patch("agent.Transcript")
+    @patch("agent.acompletion", new_callable=AsyncMock)
+    async def test_every_sub_agent_turn_moves_the_total(
+        self, mock_acompletion, mock_transcript_cls, mock_create_registry, mock_print
+    ):
+        """Not just the last one: a sub-agent that works for a while is visible
+        as it goes, which is the whole point of a running total."""
+        mock_create_registry.return_value = self.registry()
+        mock_acompletion.side_effect = [
+            self.response(usage={"prompt_tokens": 100, "completion_tokens": 10}, tool="Read"),
+            self.response(usage={"prompt_tokens": 300, "completion_tokens": 30}),
+        ]
+        ui = RecordingUI()
+
+        await self.run_subagent(ui)
+
+        self.assertEqual([info.total_tokens for info in ui.usage_updates], [110, 330])
+
+    @patch("builtins.print")
+    @patch("agent.create_core_registry")
+    @patch("agent.Transcript")
+    @patch("agent.acompletion", new_callable=AsyncMock)
+    async def test_the_running_total_agrees_with_the_ledger(
+        self, mock_acompletion, mock_transcript_cls, mock_create_registry, mock_print
+    ):
+        """The invariant behind the bug: what the status bar shows live is what
+        a --resume would rebuild, so the number never jumps between sessions."""
+        mock_create_registry.return_value = self.registry()
+        mock_acompletion.side_effect = [
+            self.response(usage={"prompt_tokens": 100, "completion_tokens": 10}, tool="Read"),
+            self.response(usage={"prompt_tokens": 300, "completion_tokens": 30}),
+        ]
+        ui = RecordingUI()
+
+        await self.run_subagent(ui)
+
+        self.assertEqual(ui.reported_tokens, self.ctx.usage_tracker.total().total_tokens)
+        self.assertEqual(
+            self.ctx.usage_tracker.by_agent()["subagent:code-reviewer"].total_tokens, 440
+        )
+
+    @patch("builtins.print")
+    @patch("agent.create_core_registry")
+    @patch("agent.Transcript")
+    @patch("agent.acompletion", new_callable=AsyncMock)
+    async def test_a_sub_agent_turn_without_usage_reports_nothing(
+        self, mock_acompletion, mock_transcript_cls, mock_create_registry, mock_print
+    ):
+        """Local models routinely omit the figure; an empty update would only
+        add noise."""
+        mock_create_registry.return_value = self.registry()
+        mock_acompletion.return_value = self.response()
+        ui = RecordingUI()
+
+        await self.run_subagent(ui)
+
+        self.assertEqual(ui.reported_tokens, 0)
+
+    @patch("builtins.print")
+    @patch("agent.create_core_registry")
+    @patch("agent.Transcript")
+    @patch("agent.acompletion", new_callable=AsyncMock)
+    async def test_the_sub_agents_rendering_still_stays_hidden(
+        self, mock_acompletion, mock_transcript_cls, mock_create_registry, mock_print
+    ):
+        """Reporting tokens must not have opened the floodgates on everything
+        else the sub-agent does."""
+        mock_create_registry.return_value = self.registry()
+        mock_acompletion.return_value = self.response(
+            usage={"prompt_tokens": 10, "completion_tokens": 1}
+        )
+
+        rendered: list[str] = []
+
+        class WatchfulUI(RecordingUI):
+            async def assistant_text(self, text: str) -> None:
+                rendered.append(text)
+
+            async def tool_result(self, call) -> None:
+                rendered.append(call.summary)
+
+        await self.run_subagent(WatchfulUI())
+
+        self.assertEqual(rendered, [])
+
+
 class MockTranscriptState:
     """A lightweight mock to simulate transcript state changes in memory."""
     def __init__(self, path):
@@ -1131,24 +1356,6 @@ class MockTranscriptState:
         self.messages = []
     def append(self, msg):
         self.messages.append(msg)
-
-class RecordingUI(NullUI):
-    """Replays a scripted conversation and keeps what the REPL rendered."""
-
-    def __init__(self, inputs: list[str]):
-        self.inputs = list(inputs)
-        self.reports: list = []
-        self.usage_updates: list = []
-
-    async def read_user_input(self) -> str:
-        return self.inputs.pop(0)
-
-    async def show_usage(self, report) -> None:
-        self.reports.append(report)
-
-    async def usage(self, info) -> None:
-        self.usage_updates.append(info)
-
 
 class TestReplUsageCommands(unittest.IsolatedAsyncioTestCase):
     """

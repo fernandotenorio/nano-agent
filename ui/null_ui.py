@@ -86,6 +86,13 @@ class QuietUI(NullUI):
     def __init__(self, parent: UI):
         self._parent = parent
 
+    async def usage(self, info: UsageInfo) -> None:
+        # What a sub-agent spends is spent by the session, so the running total
+        # has to keep up with it even though the turn that spent it is hidden.
+        # Suppressing this is what used to leave the total short until a
+        # --resume rebuilt it from the transcripts on disk.
+        await self._parent.usage(info)
+
     async def confirm_shell(self, command: str, description: str | None = None) -> ShellDecision:
         return await self._parent.confirm_shell(command, description)
 

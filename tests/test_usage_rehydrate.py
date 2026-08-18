@@ -267,6 +267,61 @@ class TestRehydrateSubagents(RehydrateTestCase):
 
         self.assertEqual(rehydrate_session_usage(self.main_path).records, [])
 
+    def test_a_transcript_that_only_shares_the_prefix_is_not_swept_up(self):
+        """'session_backup.jsonl' starts with the same characters but is not a
+        name we ever wrote, so its tokens are not ours to count."""
+        self.write(self.main_path, [])
+        self.write(self.base_path / "session_backup.jsonl", [
+            text_turn("m", "ollama/m", usage(prompt=999, completion=99)),
+        ])
+
+        self.assertEqual(rehydrate_session_usage(self.main_path).records, [])
+
+    def test_a_name_without_a_run_id_is_not_swept_up(self):
+        self.write(self.main_path, [])
+        self.write(self.base_path / "session_code-reviewer.jsonl", [
+            text_turn("m", "ollama/m", usage(prompt=999, completion=99)),
+        ])
+
+        self.assertEqual(rehydrate_session_usage(self.main_path).records, [])
+
+    def test_a_run_id_that_is_not_hex_is_not_swept_up(self):
+        """The run id is `uuid4().hex[:6]`; anything else is another file."""
+        self.write(self.main_path, [])
+        self.write(self.base_path / "session_notes_draft2.jsonl", [
+            text_turn("m", "ollama/m", usage(prompt=999, completion=99)),
+        ])
+
+        self.assertEqual(rehydrate_session_usage(self.main_path).records, [])
+
+    def test_nothing_is_ever_absorbed_as_an_unknown_sub_agent(self):
+        """A name we cannot parse is not a sub-agent of ours, so it must be
+        skipped rather than filed under 'subagent:unknown'."""
+        self.write(self.main_path, [])
+        for name in ("session_backup.jsonl", "session_2026-08-18.jsonl", "session_.jsonl"):
+            self.write(self.base_path / name, [
+                text_turn("m", "ollama/m", usage(prompt=100, completion=10)),
+            ])
+
+        by_agent = rehydrate_session_usage(self.main_path).by_agent()
+
+        self.assertNotIn("subagent:unknown", by_agent)
+
+    def test_a_real_sub_agent_is_still_absorbed_alongside_lookalikes(self):
+        """Narrowing the match must not cost us the transcripts that count."""
+        self.write(self.main_path, [])
+        self.write(self.base_path / "session_backup.jsonl", [
+            text_turn("m", "ollama/m", usage(prompt=999, completion=99)),
+        ])
+        self.write(self.subagent_path("explore", "a1b2c3"), [
+            text_turn("m", "ollama/m", usage(prompt=40, completion=4)),
+        ])
+
+        by_agent = rehydrate_session_usage(self.main_path).by_agent()
+
+        self.assertEqual(list(by_agent), ["subagent:explore"])
+        self.assertEqual(by_agent["subagent:explore"].total_tokens, 44)
+
     def test_a_sub_agents_own_tool_usage_lands_under_the_sub_agent(self):
         self.write(self.main_path, [])
         self.write(self.subagent_path("explore"), [
@@ -316,6 +371,23 @@ class TestSubagentTypeFromPath(unittest.TestCase):
 
     def test_an_empty_type_becomes_unknown(self):
         sibling = Path("/t/session__123456.jsonl")
+
+        self.assertEqual(subagent_type_from_path(self.main_path, sibling), "unknown")
+
+    def test_a_name_with_no_run_id_becomes_unknown(self):
+        sibling = Path("/t/session_code-reviewer.jsonl")
+
+        self.assertEqual(subagent_type_from_path(self.main_path, sibling), "unknown")
+
+    def test_a_run_id_that_is_not_hex_becomes_unknown(self):
+        """Only the run id shape tells one of our transcripts from a file that
+        happens to share the prefix."""
+        sibling = Path("/t/session_notes_draft2.jsonl")
+
+        self.assertEqual(subagent_type_from_path(self.main_path, sibling), "unknown")
+
+    def test_a_name_that_merely_shares_the_prefix_becomes_unknown(self):
+        sibling = Path("/t/session_backup.jsonl")
 
         self.assertEqual(subagent_type_from_path(self.main_path, sibling), "unknown")
 

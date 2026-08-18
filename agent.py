@@ -383,6 +383,9 @@ async def execute_tool(
             tool=tu.name,
             usage=internal_usage,
         )
+        # Anything the ledger counts, the running total has to count too, or
+        # the two only agree again after a --resume.
+        await ui.usage(UsageInfo.from_dict(internal_usage))
 
     content: list[TextMessageContent | ToolResultMessageContent] = [
         ToolResultMessageContent(
