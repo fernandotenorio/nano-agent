@@ -100,6 +100,8 @@ class RichUI(UI):
         c.print(f"[dim]Workspace:[/dim] {escape(str(info.workspace))}{branch}")
         if info.cwd != info.workspace:
             c.print(f"[dim]Directory:[/dim] {escape(str(info.cwd))}")
+        if info.session_id:
+            c.print(f"[dim]Session:[/dim] {escape(info.session_id)}")
         c.print(f"[dim]Transcript: {escape(str(info.transcript_path))}[/dim]")
         c.print("[dim]Type '/quit' to exit, '/plan' or '/build' to switch modes.[/dim]")
 

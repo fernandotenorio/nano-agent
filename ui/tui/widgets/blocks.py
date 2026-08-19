@@ -124,6 +124,8 @@ class SessionBanner(Vertical):
         self._info = info
 
     def compose(self) -> ComposeResult:
+        if self._info.session_id:
+            yield Static(f"Session: {self._info.session_id}", markup=False, classes="session-line")
         yield Static(f"Transcript: {self._info.transcript_path}", markup=False, classes="session-line")
         yield Static(
             "Enter sends  ·  Shift+Enter for a new line  ·  / for commands",

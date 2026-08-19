@@ -36,6 +36,12 @@ class SessionInfo:
     workspace: Path
     cwd: Path
     transcript_path: Path
+
+    # The id `--resume` takes. Shown because the transcript now lives under a
+    # hashed home directory, so the path alone is not something a user can be
+    # expected to read an id out of.
+    session_id: str = ""
+
     git_branch: str | None = None
 
     # Which service serves `model` ("ollama", "anthropic", ...). Derived from

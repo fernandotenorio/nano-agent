@@ -1,9 +1,16 @@
 ﻿import asyncio
+import io
+import json
+import os
+import tempfile
 import unittest
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from contextlib import nullcontext, redirect_stderr
+from unittest.mock import ANY, AsyncMock, MagicMock, PropertyMock, patch
 from pathlib import Path
 import sys
 import uuid
+
+import sessions
 
 from typedefs import (
     AssistantMessage, TextMessageContent, ToolUseMessageContent, 
@@ -11,12 +18,14 @@ from typedefs import (
     AgentCallback, SystemMessage
 )
 
+from config import AppConfig
 from hooks import PreToolUseEvent, PostToolUseEvent, UserPromptEvent
 from agent import run_agentic_loop
 from agent import execute_tool, handle_shell, handle_subagent, main, run_repl
 from sessioncontext import AgentPolicy, AgentMode, InvocationContext
 from ui.base import SessionInfo, UsageInfo
 from ui.null_ui import NullUI, QuietUI
+from usagetracker import SessionUsageTracker
 
 
 class StubREPLUI(NullUI):
@@ -1053,7 +1062,7 @@ class TestHandleSubagentGroup4(unittest.IsolatedAsyncioTestCase):
         )
 
     @patch("builtins.print")
-    @patch("agent.uuid.uuid4")
+    @patch("sessions.uuid.uuid4")
     @patch("agent.create_core_registry")
     @patch("agent.Transcript")
     @patch("agent.run_agentic_loop", new_callable=AsyncMock)
@@ -1087,8 +1096,10 @@ class TestHandleSubagentGroup4(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(is_error)
         self.assertEqual(result[0].text, "Sub-agent done.")
         
-        # 1. Verify correct file path construction (must be in same dir, correctly named)
-        expected_path = Path("/mock/dir/parent_transcript_code-reviewer_123456.jsonl")
+        # 1. The transcript lands in the session's own 'subagents' directory,
+        # which is what lets a resumed session find it without matching
+        # filenames against the main transcript's name.
+        expected_path = Path("/mock/dir/subagents/code-reviewer_123456.jsonl")
         mock_transcript_class.assert_called_once_with(expected_path)
         
         # 2. Verify initial prompt injection
@@ -1502,27 +1513,37 @@ class TestMainLoopGroup5(unittest.IsolatedAsyncioTestCase):
         self.ui_patcher = patch("ui.rich_ui.RichUI", StubREPLUI)
         self.ui_patcher.start()
 
+        # main() resolves a session against the user's home directory and writes
+        # its meta.json there. These tests run it for real, so the home is
+        # redirected into a temporary directory: nothing may land in the
+        # developer's own ~/.prisma.
+        self.home_dir = tempfile.TemporaryDirectory()
+        self.fake_home = Path(self.home_dir.name) / ".prisma"
+        self.home_patcher = patch(
+            "config.AppConfig.home_config_dir", new_callable=PropertyMock
+        )
+        self.home_patcher.start().return_value = self.fake_home
+
     def tearDown(self):
         self.argv_patcher.stop()
         self.ui_patcher.stop()
+        self.home_patcher.stop()
+        self.home_dir.cleanup()
 
     @patch("builtins.print")
     @patch("agent.run_agentic_loop", new_callable=AsyncMock)
     @patch("agent.HookManager")
     @patch("agent.create_core_registry")
-    @patch("agent.get_transcript_path")
     @patch("agent.Transcript")
     async def test_hook_blocks_prompt(
-        self, mock_transcript_cls, mock_get_path, mock_registry, mock_hook_mgr_cls, mock_run_loop, mock_print
+        self, mock_transcript_cls, mock_registry, mock_hook_mgr_cls, mock_run_loop, mock_print
     ):
         """
         Test 5.1: Hook Blocks Prompt
         If a hook flags block=True, the prompt is rejected, not appended to the transcript, 
         and the LLM loop is skipped.
         """
-        # Setup Mocks
-        mock_get_path.return_value = Path("/mock/main.jsonl")
-        mock_transcript_cls.return_value = MockTranscriptState(mock_get_path.return_value)
+        mock_transcript_cls.return_value = MockTranscriptState(Path("/mock/main.jsonl"))
         
         mock_hook_mgr = MagicMock()
         mock_hook_mgr_cls.return_value = mock_hook_mgr
@@ -1551,10 +1572,9 @@ class TestMainLoopGroup5(unittest.IsolatedAsyncioTestCase):
     @patch("agent.run_agentic_loop", new_callable=AsyncMock)
     @patch("agent.HookManager")
     @patch("agent.create_core_registry")
-    @patch("agent.get_transcript_path")
     @patch("agent.Transcript")
     async def test_hook_injects_pre_post_context(
-        self, mock_transcript_cls, mock_get_path, mock_registry, mock_hook_mgr_cls, mock_run_loop, mock_print
+        self, mock_transcript_cls, mock_registry, mock_hook_mgr_cls, mock_run_loop, mock_print
     ):
         """
         Test 5.2: Hook Injects Pre/Post Context
@@ -1618,10 +1638,9 @@ class TestMainLoopGroup5(unittest.IsolatedAsyncioTestCase):
     @patch("builtins.print")
     @patch("agent.run_agentic_loop", new_callable=AsyncMock)
     @patch("agent.HookManager")
-    @patch("agent.get_transcript_path")
     @patch("agent.Transcript")
     async def test_first_prompt_flag(
-        self, mock_transcript_cls, mock_get_path, mock_hook_mgr_cls, mock_run_loop, mock_print
+        self, mock_transcript_cls, mock_hook_mgr_cls, mock_run_loop, mock_print
     ):
         """
         Test 5.4: First Prompt Flag
@@ -1674,6 +1693,162 @@ class TestMainLoopGroup5(unittest.IsolatedAsyncioTestCase):
 
         # If it didn't crash, the test passes.
         mock_run_loop.assert_not_called()
+
+
+class TestSessionStartup(unittest.IsolatedAsyncioTestCase):
+    """
+    Test Group 6: Which session a run belongs to (main, agent.resolve_session)
+
+    Resolution happens before any UI exists, so a session that cannot be
+    resumed has to stop the process rather than quietly start a new one: a
+    mistyped id silently starting over is how a conversation gets lost.
+    """
+
+    def setUp(self):
+        self.home_dir = tempfile.TemporaryDirectory()
+        self.fake_home = Path(self.home_dir.name) / ".prisma"
+        self.home_patcher = patch(
+            "config.AppConfig.home_config_dir", new_callable=PropertyMock
+        )
+        self.home_patcher.start().return_value = self.fake_home
+        self.addCleanup(self.home_patcher.stop)
+        self.addCleanup(self.home_dir.cleanup)
+
+        self.ui_patcher = patch("ui.rich_ui.RichUI", StubREPLUI)
+        self.ui_patcher.start()
+        self.addCleanup(self.ui_patcher.stop)
+
+        self.app_config = AppConfig(app_name="prisma", app_dir_name=".prisma")
+        self.workspace = Path.cwd().resolve()
+
+    def argv(self, *extra: str) -> list[str]:
+        return ["agent.py", "--ui", "rich", *extra]
+
+    async def run_main(
+        self,
+        *extra: str,
+        inputs: list[str] | None = None,
+        stderr: io.StringIO | None = None,
+    ):
+        """Runs main() end to end against the fake home.
+
+        `stderr` collects what a failed resolution reports; capturing it means
+        leaving `print` alone, which is otherwise patched only to keep the test
+        output quiet.
+        """
+        quiet = nullcontext() if stderr else patch("builtins.print")
+        errors = redirect_stderr(stderr) if stderr else nullcontext()
+
+        with patch.object(sys, "argv", self.argv(*extra)), \
+             patch("agent.run_agentic_loop", new_callable=AsyncMock), \
+             patch("agent.Transcript") as transcript_cls, \
+             patch("builtins.input", side_effect=inputs or ["/quit"]), \
+             quiet, errors:
+            transcript_cls.return_value = MockTranscriptState(Path("/mock/main.jsonl"))
+            await main()
+
+    def seed_session(self, session_id: str) -> sessions.SessionPaths:
+        paths = sessions.session_for(self.app_config, self.workspace, session_id)
+        paths.directory.mkdir(parents=True, exist_ok=True)
+        paths.transcript.write_text("", encoding="utf-8")
+        return paths
+
+    async def test_a_fresh_run_records_its_metadata(self):
+        await self.run_main()
+
+        metas = list(self.fake_home.glob("projects/*/sessions/*/meta.json"))
+        self.assertEqual(len(metas), 1)
+
+        meta = json.loads(metas[0].read_text(encoding="utf-8"))
+        self.assertEqual(meta["workspace"], str(self.workspace))
+        self.assertIsNone(meta["title"])
+        self.assertEqual(meta["session_id"], metas[0].parent.name)
+
+    async def test_an_unknown_resume_id_stops_the_process(self):
+        with self.assertRaises(SystemExit) as caught:
+            await self.run_main("--resume", "no-such-session")
+
+        self.assertEqual(caught.exception.code, 1)
+
+    async def test_an_unknown_resume_id_lists_what_does_exist(self):
+        """The id is the only handle the user has, and it lives under a hashed
+        directory nobody reads by hand."""
+        self.seed_session("2026-08-19_16-25-03-a1b2c3")
+        reported = io.StringIO()
+
+        with self.assertRaises(SystemExit):
+            await self.run_main("--resume", "no-such-session", stderr=reported)
+
+        self.assertIn("2026-08-19_16-25-03-a1b2c3", reported.getvalue())
+
+    async def test_a_directory_without_a_transcript_cannot_be_resumed(self):
+        empty = sessions.session_for(self.app_config, self.workspace, "halfmade")
+        empty.directory.mkdir(parents=True)
+
+        with self.assertRaises(SystemExit) as caught:
+            await self.run_main("--resume", "halfmade")
+
+        self.assertEqual(caught.exception.code, 1)
+
+    async def test_continue_with_no_history_stops_the_process(self):
+        with self.assertRaises(SystemExit) as caught:
+            await self.run_main("--continue")
+
+        self.assertEqual(caught.exception.code, 1)
+
+    async def test_resume_and_continue_are_mutually_exclusive(self):
+        with self.assertRaises(SystemExit):
+            await self.run_main("--resume", "some-id", "--continue", stderr=io.StringIO())
+
+    async def test_resuming_rebuilds_the_ledger_instead_of_starting_over(self):
+        paths = self.seed_session("2026-08-19_16-25-03-a1b2c3")
+
+        with patch("agent.rehydrate_session_usage") as rehydrate:
+            rehydrate.return_value = SessionUsageTracker()
+            await self.run_main("--resume", paths.session_id)
+
+        rehydrate.assert_called_once_with(paths.transcript)
+
+    async def test_a_fresh_run_does_not_rebuild_a_ledger(self):
+        with patch("agent.rehydrate_session_usage") as rehydrate:
+            await self.run_main()
+
+        rehydrate.assert_not_called()
+
+    async def test_continue_picks_up_the_last_used_session(self):
+        older = self.seed_session("2026-08-19_16-25-03-aaaaaa")
+        newer = self.seed_session("2026-08-19_17-00-00-bbbbbb")
+        os.utime(newer.transcript, (1_000_000, 1_000_000))
+        os.utime(older.transcript, (2_000_000, 2_000_000))
+
+        with patch("agent.rehydrate_session_usage") as rehydrate:
+            rehydrate.return_value = SessionUsageTracker()
+            await self.run_main("--continue")
+
+        rehydrate.assert_called_once_with(older.transcript)
+
+    async def test_resuming_leaves_an_existing_title_alone(self):
+        """Which is the whole reason the title lives in meta.json and not in the
+        directory name."""
+        paths = self.seed_session("2026-08-19_16-25-03-a1b2c3")
+        paths.meta_file.write_text(
+            json.dumps({"session_id": paths.session_id, "title": "Nightly triage"}),
+            encoding="utf-8",
+        )
+
+        with patch("agent.rehydrate_session_usage") as rehydrate:
+            rehydrate.return_value = SessionUsageTracker()
+            await self.run_main("--resume", paths.session_id)
+
+        self.assertEqual(sessions.read_meta(paths)["title"], "Nightly triage")
+
+    async def test_transcripts_stay_outside_the_workspace(self):
+        """Which is what keeps them out of reach of the agent's own file tools."""
+        await self.run_main()
+
+        transcripts = list(self.fake_home.glob("projects/*/sessions/*"))
+        self.assertEqual(len(transcripts), 1)
+        self.assertFalse(transcripts[0].is_relative_to(self.workspace))
 
 
 if __name__ == "__main__":

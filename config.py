@@ -23,6 +23,19 @@ class AppConfig:
         """
         return Path.home() / self.app_dir_name
 
+    @property
+    def projects_dir(self) -> Path:
+        """
+        Global store of per-project state, keyed by workspace root.
+        Example: ~/.prisma/projects
+
+        Session transcripts live here rather than inside the workspace: they are
+        a record of the conversation, not part of the project, and keeping them
+        out of the tree means they can never be listed, searched, or edited by
+        the agent's own tools.
+        """
+        return self.home_config_dir / "projects"
+
     def project_config_dir(self, cwd: Path) -> Path:
         """
         Project-local Prisma configuration directory.
@@ -41,12 +54,6 @@ class AppConfig:
         Project SYSTEM.md location.
         """
         return self.project_config_dir(cwd) / "SYSTEM.md"
-
-    def project_transcripts_dir(self, cwd: Path) -> Path:
-        """
-        Project transcript storage directory.
-        """
-        return self.project_config_dir(cwd) / "transcripts"
 
 
 def load_app_config() -> AppConfig:

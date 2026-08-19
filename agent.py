@@ -3,18 +3,17 @@ import os
 import sys
 import time
 import argparse
-import uuid
 from functools import partial
 from pathlib import Path
-from datetime import datetime
 import logging
 
+import sessions
 from capabilities import probe_capabilities, user_warnings
 from config import AppConfig, load_app_config
 from prompts import build_system_prompt
 from sessioncontext import InvocationContext, AgentPolicy, AgentMode
 
-from typing import Literal
+from typing import Literal, NoReturn
 from typedefs import (
     TextMessageContent, ToolResultMessageContent, ToolUseMessageContent,
     ToolFailure, ToolResult, UserMessage, SystemMessage, ShellCallback,
@@ -185,10 +184,10 @@ async def handle_subagent(
     ui: UI = NullUI()
 ) -> tuple[list[TextMessageContent], bool]:
     """Spins up a recursive sub-agent loop with isolated file-state, registry, and hooks."""
-    parent_dir = parent_transcript_path.parent
-    sub_id = uuid.uuid4().hex[:6]
-    sub_transcript_path = parent_dir / f"{parent_transcript_path.stem}_{callback.subagent_type}_{sub_id}.jsonl"
-    
+    sub_transcript_path = sessions.subagent_transcript_path(
+        parent_transcript_path, callback.subagent_type
+    )
+
     sub_transcript = Transcript(sub_transcript_path)
 
     # Sub-agent internals are hidden behind a single spinner: the quiet UI
@@ -476,29 +475,62 @@ async def run_agentic_loop(
     await ui.notice(warning)
     return [TextMessageContent(text=warning)]
 
-def get_transcript_path(
-    app_config: AppConfig,
-    cwd: Path,
-    resume_arg: str | None,
-    warnings: list[str] | None = None,
-) -> Path:
-    """Determines where to load/save the transcript file.
+RECENT_SESSIONS_SHOWN = 5
+"""How many ids to offer when a requested session cannot be found."""
 
-    Runs before the UI exists (a full-screen front-end has nothing to draw on
-    yet), so anything worth telling the user is collected into `warnings` and
-    shown later in the session banner.
+
+def _exit_with_session_help(message: str, known_ids: list[str]) -> NoReturn:
+    """Reports a session that cannot be resumed, and stops.
+
+    Resolution happens before the UI exists, so this reports itself the only
+    way it can, like the workspace check does. The recent ids are listed
+    because the alternative is asking the user to go read a directory name
+    built from a hash.
     """
-    if resume_arg:
-        path = Path(resume_arg).expanduser().resolve()
-        if not path.exists() and warnings is not None:
-            warnings.append(f"Provided resume path '{path}' does not exist. It will be created.")
-        return path
-    
-    # Default behavior: create a hidden `.agent/transcripts/` folder in the current directory
-    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    default_dir = app_config.project_transcripts_dir(cwd)
-    default_dir.mkdir(parents=True, exist_ok=True)
-    return default_dir / f"{timestamp}.jsonl"
+    print(message, file=sys.stderr)
+
+    if known_ids:
+        print("\nMost recent sessions for this workspace:", file=sys.stderr)
+        for session_id in reversed(known_ids[-RECENT_SESSIONS_SHOWN:]):
+            print(f"  {session_id}", file=sys.stderr)
+
+    sys.exit(1)
+
+
+def resolve_session(
+    app_config: AppConfig,
+    workspace: Path,
+    resume_id: str | None,
+    continue_latest: bool,
+) -> tuple[sessions.SessionPaths, bool]:
+    """Decides which session this run belongs to.
+
+    Returns the session's paths and whether it already has a conversation to
+    pick up, which is what tells the caller to rebuild the token ledger instead
+    of starting a fresh one.
+
+    Nothing is created here; asking for a session that does not exist is an
+    error rather than an empty new one, because a mistyped id silently starting
+    over is how a conversation gets lost.
+    """
+    if resume_id:
+        paths = sessions.session_for(app_config, workspace, resume_id)
+        if not paths.exists:
+            _exit_with_session_help(
+                f"No session '{resume_id}' found for workspace {workspace}.",
+                sessions.list_session_ids(app_config, workspace),
+            )
+        return paths, True
+
+    if continue_latest:
+        latest = sessions.latest_session(app_config, workspace)
+        if latest is None:
+            _exit_with_session_help(
+                f"No previous session to continue for workspace {workspace}.", []
+            )
+        return latest, True
+
+    return sessions.new_session(app_config, workspace), False
 
 
 def read_git_branch(root: Path) -> str | None:
@@ -627,7 +659,22 @@ async def main():
     
     # Parse Command Line Arguments
     parser = argparse.ArgumentParser(description=f"{app_config.app_name.capitalize()} Code Agent")
-    parser.add_argument("--resume", type=str, help="Path to an existing .jsonl transcript to resume")
+    # A session is named by its id, not by a path: the transcript now lives in
+    # a home directory nobody types by hand.
+    session_group = parser.add_mutually_exclusive_group()
+    session_group.add_argument(
+        "--resume",
+        type=str,
+        metavar="SESSION_ID",
+        help="Id of a session to resume for this workspace",
+    )
+    session_group.add_argument(
+        "--continue",
+        dest="continue_latest",
+        action="store_true",
+        help="Resume the most recently used session for this workspace",
+    )
+
     parser.add_argument(
         "--model", 
         type=str, 
@@ -686,8 +733,18 @@ async def main():
     # the UI is alive and can render the session banner.
     startup_warnings: list[str] = []
 
-    # Creates transcripts folder if it does not exists
-    transcript_file = get_transcript_path(app_config, cwd, args.resume, startup_warnings)
+    # Which conversation this run belongs to. Keyed by the workspace root, so
+    # the same project answers the same way from any subdirectory.
+    session, resuming = resolve_session(
+        app_config, root_dir, args.resume, args.continue_latest
+    )
+    transcript_file = session.transcript
+
+    # Record what this session is while it is being created. A failure here
+    # costs a future rename its title, not the conversation.
+    meta_warning = sessions.ensure_meta(session, root_dir)
+    if meta_warning:
+        startup_warnings.append(meta_warning)
 
     # Probe the environment once. This decides which Grep engine gets
     # registered below, and what the startup banner and system prompt warn about.
@@ -697,7 +754,7 @@ async def main():
     # restarting it, so the totals on screen cover the whole conversation and
     # not just the part of it that happened since the last launch.
     usage_tracker = (
-        rehydrate_session_usage(transcript_file) if args.resume else SessionUsageTracker()
+        rehydrate_session_usage(transcript_file) if resuming else SessionUsageTracker()
     )
 
     # 1. Create the context
@@ -705,7 +762,7 @@ async def main():
         workspace=root_dir,
         cwd=cwd,
         workspace_is_git_repo = (root_dir / ".git").exists(),
-        resume_file=Path(args.resume) if args.resume else None,
+        resume_file=transcript_file if resuming else None,
         capabilities=capabilities,
         usage_tracker=usage_tracker,
     )
@@ -751,6 +808,7 @@ async def main():
         app_name=app_config.app_name.capitalize(),
         model=args.model,
         mode=policy.mode.name,
+        session_id=session.session_id,
         workspace=root_dir,
         cwd=cwd,
         transcript_path=transcript_file,

@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+import sessions
 from transcript import Transcript
 from typedefs import AssistantMessage, ToolResultMessageContent, UserMessage
 from ui.base import UsageReport, UsageRow, UsageSection, split_model
@@ -415,62 +416,60 @@ def absorb_messages(
                     )
 
 
-RUN_ID_PATTERN = r"[0-9a-fA-F]{6}"
-"""Shape of the run id `agent.handle_subagent` appends: `uuid4().hex[:6]`."""
+RUN_ID_PATTERN = rf"[0-9a-fA-F]{{{sessions.RUN_ID_CHARS}}}"
+"""Shape of the run id `sessions.subagent_transcript_path` appends."""
 
 
-def _subagent_type_of(main_path: Path, sibling: Path) -> str | None:
+def _subagent_type_of(name: str) -> str | None:
     """Reads a sub-agent's type out of its transcript filename.
 
-    Sub-agent transcripts are named '<parent stem>_<type>_<run id>.jsonl' (see
-    `agent.handle_subagent`). Requiring the whole shape, run id included, is
-    what separates a transcript we wrote from one that merely starts with the
-    same characters: a hand-made 'session_backup.jsonl' shares the prefix but
-    is somebody else's file, and its tokens are not ours to count.
+    Sub-agent transcripts are named '<type>_<run id>.jsonl' (see
+    `sessions.subagent_transcript_path`). Requiring the run id too is what
+    separates a transcript we wrote from a file that merely landed in the same
+    directory: a hand-made 'notes.jsonl' has no tokens of ours to count.
 
     The type is matched greedily so that a type containing underscores keeps
     all of them and only the trailing run id is dropped.
 
     Returns None for a name that does not fit the shape.
     """
-    match = re.fullmatch(
-        rf"{re.escape(main_path.stem)}_(?P<type>.+)_{RUN_ID_PATTERN}\.jsonl",
-        sibling.name,
-    )
+    match = re.fullmatch(rf"(?P<type>.+)_{RUN_ID_PATTERN}\.jsonl", name)
 
     return match.group("type") if match else None
 
 
-def subagent_type_from_path(main_path: Path, sibling: Path) -> str:
+def subagent_type_from_name(name: str) -> str:
     """Recovers a sub-agent's type from its transcript filename.
 
     A name that does not fit the shape is reported as unknown rather than
     guessed at.
     """
-    return _subagent_type_of(main_path, sibling) or UNKNOWN
+    return _subagent_type_of(name) or UNKNOWN
 
 
 def rehydrate_session_usage(main_path: Path) -> SessionUsageTracker:
     """Rebuilds the ledger of a previous session from its transcripts.
 
-    Sub-agents write their own sibling transcripts, so reading only the main
-    one would quietly drop everything they spent. They are picked out of the
-    same directory by the exact name `handle_subagent` gives them; anything
-    else there belongs to another session and is left alone. A sub-agent cannot
-    launch another sub-agent, so there is never a deeper level to chase.
+    Sub-agents write their own transcripts, so reading only the main one would
+    quietly drop everything they spent. They live in a 'subagents' directory
+    beside the main transcript, which is the whole session's, so everything
+    found there is ours to count. A sub-agent cannot launch another sub-agent,
+    so there is never a deeper level to chase.
     """
     tracker = SessionUsageTracker()
 
     if main_path.exists():
         absorb_messages(Transcript(main_path).messages, MAIN_AGENT, tracker)
 
-    for sibling in sorted(main_path.parent.glob("*.jsonl")):
-        subagent_type = _subagent_type_of(main_path, sibling)
+    subagents_dir = main_path.parent / sessions.SUBAGENTS_DIR_NAME
+
+    for transcript_file in sorted(subagents_dir.glob(f"*{sessions.TRANSCRIPT_SUFFIX}")):
+        subagent_type = _subagent_type_of(transcript_file.name)
         if subagent_type is None:
             continue
 
         absorb_messages(
-            Transcript(sibling).messages,
+            Transcript(transcript_file).messages,
             subagent_name(subagent_type),
             tracker,
         )

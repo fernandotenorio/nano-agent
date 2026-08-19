@@ -38,7 +38,8 @@ def session_info(**overrides) -> SessionInfo:
         mode="BUILD",
         workspace=Path("/work"),
         cwd=Path("/work"),
-        transcript_path=Path("/work/.prisma/transcripts/now.jsonl"),
+        transcript_path=Path("/home/.prisma/projects/work-1234abcd/sessions/s1/s1.jsonl"),
+        session_id="2026-08-19_16-25-03-a1b2c3",
         git_branch="main",
         provider="ollama",
     )
