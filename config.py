@@ -10,6 +10,11 @@ class AppConfig:
 
     Values here describe Prisma itself, not a single invocation.
     CLI arguments should remain separate.
+
+    Everything Prisma owns lives under the user's home directory. Nothing is
+    kept inside a workspace: a project's own instructions belong in a committed
+    AGENTS.md, and what Prisma records about a conversation is not part of the
+    project it was working on.
     """
 
     app_name: str
@@ -36,24 +41,11 @@ class AppConfig:
         """
         return self.home_config_dir / "projects"
 
-    def project_config_dir(self, cwd: Path) -> Path:
-        """
-        Project-local Prisma configuration directory.
-        Example: <cwd>/.prisma
-        """
-        return cwd / self.app_dir_name
-
     def global_system_prompt_file(self) -> Path:
         """
         Global SYSTEM.md location.
         """
         return self.home_config_dir / "SYSTEM.md"
-
-    def project_system_prompt_file(self, cwd: Path) -> Path:
-        """
-        Project SYSTEM.md location.
-        """
-        return self.project_config_dir(cwd) / "SYSTEM.md"
 
 
 def load_app_config() -> AppConfig:

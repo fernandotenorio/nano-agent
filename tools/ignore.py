@@ -13,6 +13,10 @@ import pathspec
 # Patterns that Prisma should almost never expose.
 # These use gitignore (gitwildmatch) syntax.
 #
+# All of these are machine-generated: caches, dependency trees, and version
+# control internals. Prisma keeps nothing of its own inside a workspace, so
+# there is nothing here on its own behalf.
+#
 BUILTIN_IGNORE_PATTERNS = (
     # VCS
     ".git/",
@@ -26,9 +30,6 @@ BUILTIN_IGNORE_PATTERNS = (
 
     # JavaScript
     "node_modules/",
-
-    # We
-    ".prisma/"
 )
 
 # Upper bound for the `git ls-files` query. Git is fast even on large repos

@@ -1,15 +1,14 @@
 # ui/theme.py
 """
-User-customizable appearance, loaded from `.prisma/ui.json`.
+User-customizable appearance, loaded from `~/.prisma/ui.json`.
 
 The theme is deliberately a plain data structure with no rendering library
 behind it: the Textual front-end turns it into CSS variables, and it stays
 unit-testable on its own.
 
-Two files are consulted, each optional, the later overriding the earlier:
-
-    ~/.prisma/ui.json        global preferences
-    <cwd>/.prisma/ui.json    per-project overrides
+One optional file is consulted, and it is the user's own rather than a
+project's: how the interface looks is a preference of whoever is sitting at it,
+not a property of the code being worked on.
 
 A missing, malformed, or partly nonsensical file must never take the UI down
 with it: unusable values are logged and the default is kept.
@@ -171,17 +170,6 @@ def _read_config(path: Path) -> dict[str, Any]:
     return data
 
 
-def _merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
-    """Merges one level deep, which is exactly as deep as the theme goes."""
-    merged = dict(base)
-    for key, value in overlay.items():
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = {**merged[key], **value}
-        else:
-            merged[key] = value
-    return merged
-
-
 def _apply_section(section: Any, overrides: Any, name: str) -> Any:
     """Returns `section` with the valid entries of `overrides` applied."""
     if not isinstance(overrides, dict):
@@ -220,13 +208,9 @@ def theme_from_dict(data: dict[str, Any], base: UITheme = DEFAULT_THEME) -> UITh
     return dataclasses.replace(base, **changes) if changes else base
 
 
-def load_ui_theme(app_config: AppConfig, cwd: Path) -> UITheme:
-    """Loads the theme for this session: defaults, then global, then project."""
-    data: dict[str, Any] = {}
-    for directory in (app_config.home_config_dir, app_config.project_config_dir(cwd)):
-        data = _merge(data, _read_config(directory / UI_CONFIG_FILENAME))
-
-    return theme_from_dict(data)
+def load_ui_theme(app_config: AppConfig) -> UITheme:
+    """Loads the theme for this session: defaults, then the user's own file."""
+    return theme_from_dict(_read_config(app_config.home_config_dir / UI_CONFIG_FILENAME))
 
 
 def css_variables(theme: UITheme) -> dict[str, str]:

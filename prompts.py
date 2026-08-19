@@ -75,7 +75,14 @@ def _load_user_instructions(args) -> str:
     return text
 
 
-def build_system_prompt(app_config: AppConfig, cwd: Path, ctx: InvocationContext, args) -> SystemMessage:
+def build_system_prompt(app_config: AppConfig, ctx: InvocationContext, args) -> SystemMessage:
+    """Assembles the system message: core, user, global, environment.
+
+    Project-level instructions are deliberately absent here. They live in
+    AGENTS.md, which `context.gather_context_files` reads from the workspace
+    root down to cwd and injects on the first prompt: one committed, per-
+    directory file, rather than a second one saying the same thing.
+    """
     parts: list[str] = []
 
     # Immutable core prompt
@@ -89,14 +96,6 @@ def build_system_prompt(app_config: AppConfig, cwd: Path, ctx: InvocationContext
         global_system = app_config.global_system_prompt_file()
 
         text = _load_optional_text(global_system)
-        if text:
-            parts.append(text)
-
-    # Project SYSTEM.md
-    if not args.no_proj_system_prompt_file:
-        project_system = app_config.project_system_prompt_file(cwd)
-
-        text = _load_optional_text(project_system)
         if text:
             parts.append(text)
 

@@ -1,5 +1,5 @@
 /* Colors come from the theme via App.get_css_variables (see ui/theme.py):
-   every $prisma-* variable below is user-overridable in .prisma/ui.json. */
+   every $prisma-* variable below is user-overridable in ~/.prisma/ui.json. */
 
 Screen {
     layout: vertical;

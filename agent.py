@@ -545,7 +545,7 @@ def read_git_branch(root: Path) -> str | None:
     return content[:8] or None
 
 
-def create_ui(kind: str, app_config: AppConfig, cwd: Path) -> UI:
+def create_ui(kind: str, app_config: AppConfig) -> UI:
     """Builds the single concrete UI for this session.
 
     Rendering libraries are imported here and nowhere else, so that every
@@ -558,7 +558,7 @@ def create_ui(kind: str, app_config: AppConfig, cwd: Path) -> UI:
 
     from ui.theme import load_ui_theme
     from ui.tui import TextualUI
-    return TextualUI(load_ui_theme(app_config, cwd))
+    return TextualUI(load_ui_theme(app_config))
 
 
 async def run_repl(
@@ -702,11 +702,6 @@ async def main():
         action="store_true",
         help=f"Skip loading {app_config.global_system_prompt_file()}"
     )
-    parser.add_argument(
-        "--no-proj-system-prompt-file",
-        action="store_true",
-        help=f"Skip loading {app_config.project_system_prompt_file(cwd)}"
-    )
 
     parser.add_argument(
         "--ui",
@@ -786,7 +781,7 @@ async def main():
     hooks.register_user_prompt(bound_mode_hook)
     hooks.register_user_prompt(bound_file_changes_hook)
 
-    ui = create_ui(args.ui, app_config, cwd)
+    ui = create_ui(args.ui, app_config)
 
     # A front-end with its own way in to the usage view (a key binding, a
     # button) needs to build the report at the moment it is asked for.
@@ -800,7 +795,7 @@ async def main():
 
     # System Prompt injection (only if transcript is brand new)
     if len(transcript.messages) == 0:
-        transcript.append(build_system_prompt(app_config, cwd, ctx, args))
+        transcript.append(build_system_prompt(app_config, ctx, args))
 
     provider, _ = split_model(args.model)
 

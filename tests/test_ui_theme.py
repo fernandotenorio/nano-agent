@@ -107,7 +107,10 @@ class TestThemeFromDict(unittest.TestCase):
 class TestLoadUITheme(unittest.TestCase):
     """
     Test Suite for config discovery (theme.load_ui_theme).
-    Defaults, then ~/.prisma/ui.json, then <cwd>/.prisma/ui.json.
+    Defaults, then ~/.prisma/ui.json.
+
+    A theme is a preference of whoever is sitting at the terminal, so it is
+    read from the user's home and nowhere else. A workspace has no say in it.
     """
 
     def setUp(self):
@@ -131,37 +134,36 @@ class TestLoadUITheme(unittest.TestCase):
         path.write_text(json.dumps(data) if not isinstance(data, str) else data, encoding="utf-8")
 
     def test_no_files_gives_defaults(self):
-        self.assertEqual(load_ui_theme(self.app_config, self.project), DEFAULT_THEME)
+        self.assertEqual(load_ui_theme(self.app_config), DEFAULT_THEME)
 
     def test_global_config_is_applied(self):
         self._write(self.home, {"user": {"accent": "magenta"}})
 
-        theme = load_ui_theme(self.app_config, self.project)
+        theme = load_ui_theme(self.app_config)
         self.assertEqual(theme.user.accent, "magenta")
 
-    def test_project_overrides_global(self):
-        self._write(self.home, {"user": {"accent": "magenta", "caption": "Me"}})
+    def test_a_workspace_local_config_is_ignored(self):
+        """A stale file from the old per-project layout must not still apply."""
+        self._write(self.home, {"user": {"accent": "magenta"}})
         self._write(self.project, {"user": {"accent": "green"}})
 
-        theme = load_ui_theme(self.app_config, self.project)
+        theme = load_ui_theme(self.app_config)
 
-        self.assertEqual(theme.user.accent, "green")
-        # Untouched global keys survive the merge.
-        self.assertEqual(theme.user.caption, "Me")
+        self.assertEqual(theme.user.accent, "magenta")
 
     def test_malformed_json_falls_back_to_defaults(self):
-        self._write(self.project, "{ not json")
+        self._write(self.home, "{ not json")
 
         with self.assertLogs(level="WARNING"):
-            theme = load_ui_theme(self.app_config, self.project)
+            theme = load_ui_theme(self.app_config)
 
         self.assertEqual(theme, DEFAULT_THEME)
 
     def test_non_object_json_falls_back_to_defaults(self):
-        self._write(self.project, [1, 2, 3])
+        self._write(self.home, [1, 2, 3])
 
         with self.assertLogs(level="WARNING"):
-            theme = load_ui_theme(self.app_config, self.project)
+            theme = load_ui_theme(self.app_config)
 
         self.assertEqual(theme, DEFAULT_THEME)
 
