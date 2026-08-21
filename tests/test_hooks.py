@@ -2,9 +2,27 @@ import unittest
 from unittest.mock import patch
 
 from capabilities import Capabilities
-from hooks import HookManager, capabilities_hook, initial_setup_hook, UserPromptEvent
+from hooks import (
+    HookManager,
+    MODE_ANNOUNCEMENTS,
+    PLAN_ACCEPTED_TO_BUILD,
+    UserPromptEvent,
+    agent_mode_hook,
+    capabilities_hook,
+    initial_setup_hook,
+    last_notified_mode,
+    mode_reminder,
+    restore_policy,
+)
+from sessioncontext import AgentMode, AgentPolicy
 from tools.ignore import GitStatus
-from typedefs import TextMessageContent
+from typedefs import (
+    AssistantMessage,
+    SystemMessage,
+    TextMessageContent,
+    ToolResultMessageContent,
+    UserMessage,
+)
 
 
 class TestHooks(unittest.IsolatedAsyncioTestCase):
@@ -235,6 +253,166 @@ class TestHooks(unittest.IsolatedAsyncioTestCase):
         result = await capabilities_hook(event, capabilities)
 
         self.assertEqual(len(result.context_pre), 0)
+
+
+# ---------------------------------------------------------
+# GROUP 6: Built-in agent_mode_hook, and resuming its state
+# ---------------------------------------------------------
+
+class TestAgentModeHook(unittest.IsolatedAsyncioTestCase):
+    """
+    Test Suite for the mode reminder (agent_mode_hook) and for rebuilding a
+    resumed session's policy from its transcript (restore_policy).
+
+    The reminder announces a *transition*, so it has to fire exactly once per
+    transition. That includes across a --resume: the announcement lives in the
+    transcript, while the policy that remembers making it does not, so a
+    resumed run has to read it back rather than start over.
+    """
+
+    def announcing(self, mode: AgentMode) -> UserMessage:
+        """A transcript message shaped like the one the hook produces.
+
+        The reminder arrives as `context_pre`, so it precedes the user's own
+        text in the same message; both are plain text blocks.
+        """
+        return UserMessage(content=[
+            TextMessageContent(text=mode_reminder(mode)),
+            TextMessageContent(text="carry on"),
+        ])
+
+    def accepting_a_plan(self) -> UserMessage:
+        """The tool result recorded when a plan is approved into BUILD mode."""
+        return UserMessage(content=[
+            ToolResultMessageContent(
+                tool_use_id="call_1",
+                content=PLAN_ACCEPTED_TO_BUILD,
+                tool_name="SubmitPlan",
+            )
+        ])
+
+    async def fire(self, policy: AgentPolicy, is_first_prompt: bool = False) -> UserPromptEvent:
+        return await agent_mode_hook(
+            UserPromptEvent(prompt="carry on", is_first_prompt=is_first_prompt), policy
+        )
+
+    # --- The hook -------------------------------------------------------
+
+    async def test_the_starting_mode_is_announced(self):
+        """A policy that has told the model nothing announces where it stands."""
+        result = await self.fire(AgentPolicy(mode=AgentMode.BUILD), is_first_prompt=True)
+
+        self.assertEqual(len(result.context_pre), 1)
+        self.assertIn(MODE_ANNOUNCEMENTS[AgentMode.BUILD], result.context_pre[0].text)
+
+    async def test_the_reminder_is_not_repeated_while_the_mode_holds(self):
+        policy = AgentPolicy(mode=AgentMode.BUILD)
+
+        await self.fire(policy, is_first_prompt=True)
+        result = await self.fire(policy)
+
+        self.assertEqual(result.context_pre, [])
+
+    async def test_a_switch_into_plan_mode_is_announced(self):
+        policy = AgentPolicy(mode=AgentMode.PLAN, notified_mode=AgentMode.BUILD)
+
+        result = await self.fire(policy)
+
+        self.assertEqual(len(result.context_pre), 1)
+        self.assertIn(MODE_ANNOUNCEMENTS[AgentMode.PLAN], result.context_pre[0].text)
+
+    # --- Resuming -------------------------------------------------------
+
+    async def test_resuming_does_not_repeat_the_reminder(self):
+        """The regression: a resumed session used to re-announce its own mode.
+
+        The transcript already carries the announcement, so repeating it tells
+        the model something it has read, on every resume.
+        """
+        policy = restore_policy([self.announcing(AgentMode.BUILD)])
+
+        result = await self.fire(policy)
+
+        self.assertEqual(result.context_pre, [])
+
+    def test_a_session_left_in_plan_mode_resumes_in_plan_mode(self):
+        """PLAN mode is a restriction the user chose; resuming keeps it."""
+        policy = restore_policy([self.announcing(AgentMode.PLAN)])
+
+        self.assertIs(policy.mode, AgentMode.PLAN)
+        self.assertIs(policy.notified_mode, AgentMode.PLAN)
+
+    def test_an_accepted_plan_resumes_in_build_mode(self):
+        """Approving a plan is announced by a tool result, not by a reminder.
+
+        The newest *reminder* in such a transcript still says PLAN, so reading
+        only reminders would revoke the write access the user just granted.
+        """
+        policy = restore_policy([
+            self.announcing(AgentMode.PLAN),
+            self.accepting_a_plan(),
+        ])
+
+        self.assertIs(policy.mode, AgentMode.BUILD)
+        self.assertIs(policy.notified_mode, AgentMode.BUILD)
+
+    def test_the_most_recent_announcement_wins(self):
+        policy = restore_policy([
+            self.announcing(AgentMode.PLAN),
+            self.announcing(AgentMode.BUILD),
+        ])
+
+        self.assertIs(policy.mode, AgentMode.BUILD)
+
+    async def test_a_fresh_transcript_still_gets_its_first_reminder(self):
+        policy = restore_policy([])
+
+        self.assertIs(policy.mode, AgentMode.BUILD)
+        self.assertIsNone(policy.notified_mode)
+
+        result = await self.fire(policy, is_first_prompt=True)
+        self.assertEqual(len(result.context_pre), 1)
+
+    def test_only_user_messages_are_examined(self):
+        """The reminder rides on a user message; nothing else can announce."""
+        messages = [
+            SystemMessage(content=mode_reminder(AgentMode.PLAN)),
+            AssistantMessage(content=[TextMessageContent(text=mode_reminder(AgentMode.PLAN))]),
+        ]
+
+        self.assertIsNone(last_notified_mode(messages))
+
+    def test_a_string_bodied_message_is_ignored(self):
+        """Transcripts predating block content must not crash a resume."""
+        self.assertIsNone(last_notified_mode([UserMessage(content="carry on")]))
+
+    def test_a_user_repeating_the_announcement_is_not_an_announcement(self):
+        """Typed text and injected context are indistinguishable by type, so
+        the reminder wrapper is what makes an announcement official."""
+        typed = UserMessage(content=[
+            TextMessageContent(text=f"{MODE_ANNOUNCEMENTS[AgentMode.PLAN]} Or so I am told.")
+        ])
+
+        self.assertIsNone(last_notified_mode([typed]))
+
+    def test_a_failed_tool_result_is_not_an_acceptance(self):
+        rejected = UserMessage(content=[
+            ToolResultMessageContent(
+                tool_use_id="call_1",
+                content=PLAN_ACCEPTED_TO_BUILD,
+                is_error=True,
+                tool_name="SubmitPlan",
+            )
+        ])
+
+        self.assertIsNone(last_notified_mode([rejected]))
+
+    def test_every_reminder_can_be_read_back(self):
+        """Guards the two halves against drifting apart: whatever the hook
+        writes for a mode is what the recovery has to recognise."""
+        for mode in AgentMode:
+            with self.subTest(mode=mode):
+                self.assertIs(last_notified_mode([self.announcing(mode)]), mode)
 
 
 if __name__ == "__main__":

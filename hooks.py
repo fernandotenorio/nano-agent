@@ -2,8 +2,13 @@ from __future__ import annotations
 import pydantic
 from pathlib import Path
 from textwrap import dedent
-from typing import Literal, Callable, Awaitable
-from typedefs import TextMessageContent
+from typing import Literal, Callable, Awaitable, Sequence
+from typedefs import (
+    Message,
+    TextMessageContent,
+    ToolResultMessageContent,
+    UserMessage,
+)
 from capabilities import Capabilities, model_warnings
 from config import AppConfig
 from context import gather_context_files
@@ -181,29 +186,133 @@ async def capabilities_hook(
 # Built-in Hook: Plan mode Injector
 # ---------------------------------------------------------
 
+MODE_ANNOUNCEMENTS: dict[AgentMode, str] = {
+    AgentMode.PLAN: "You are now in PLAN MODE.",
+    AgentMode.BUILD: "You are now in BUILD MODE.",
+}
+"""The sentence that opens each mode reminder.
+
+It doubles as the marker `last_notified_mode` looks for when rebuilding the
+policy of a resumed session, so the wording exists in exactly one place: a
+reminder the transcript cannot be read back out of would leave a resumed
+session unable to tell what the model has already been told.
+"""
+
+_MODE_INSTRUCTIONS: dict[AgentMode, str] = {
+    AgentMode.PLAN: (
+        "You only have access to read-only tools.\n"
+        "Investigate the codebase as needed. When you are ready, you MUST use "
+        "the `SubmitPlan` tool to propose your plan to the user."
+    ),
+    AgentMode.BUILD: "You have full access to write and shell tools.",
+}
+
+PLAN_ACCEPTED_TO_BUILD = (
+    "SUCCESS: User accepted the plan and switched to BUILD mode. "
+    "You now have access to write tools. Proceed with execution."
+)
+"""Reported by the loop when an approved plan moves the session into BUILD.
+
+Kept with the mode wording because it is the one mode transition announced by
+a tool result rather than by a reminder, and `last_notified_mode` has to
+recognise it as such.
+"""
+
+
+def mode_reminder(mode: AgentMode) -> str:
+    """Builds the reminder that announces `mode` to the model."""
+    return dedent("""
+    <system-reminder>
+    {announcement} {instructions}
+    </system-reminder>""").format(
+        announcement=MODE_ANNOUNCEMENTS[mode],
+        instructions=_MODE_INSTRUCTIONS[mode],
+    )
+
+
 async def agent_mode_hook(
     event: UserPromptEvent, 
     policy: AgentPolicy
 ) -> UserPromptEvent:
     """Injects a system reminder only when the agent transitions between modes."""
-    
-    if policy.mode != policy.notified_mode:
-        if policy.mode == AgentMode.PLAN:
-            reminder = dedent("""
-            <system-reminder>
-            You are now in PLAN MODE. You only have access to read-only tools.
-            Investigate the codebase as needed. When you are ready, you MUST use the `SubmitPlan` tool to propose your plan to the user.
-            </system-reminder>""")
-            event.context_pre.append(TextMessageContent(text=reminder))
-            
-        elif policy.mode == AgentMode.BUILD:
-            reminder = dedent("""
-            <system-reminder>
-            You are now in BUILD MODE. You have full access to write and shell tools.
-            </system-reminder>""")
-            event.context_pre.append(TextMessageContent(text=reminder))
-            
-        # Mark as notified so we don't spam the LLM on subsequent messages
-        policy.notified_mode = policy.mode
-        
+
+    if policy.mode == policy.notified_mode:
+        return event
+
+    event.context_pre.append(TextMessageContent(text=mode_reminder(policy.mode)))
+
+    # Mark as notified so we don't spam the LLM on subsequent messages
+    policy.notified_mode = policy.mode
+
     return event
+
+
+# ---------------------------------------------------------
+# Recovering the mode of a resumed session
+# ---------------------------------------------------------
+
+def _announced_mode(
+    block: TextMessageContent | ToolResultMessageContent,
+) -> AgentMode | None:
+    """The mode this content block told the model it was in, if any."""
+    if isinstance(block, TextMessageContent):
+        # The reminder wrapper is what separates our announcement from a user
+        # who happened to type the same sentence: injected context and typed
+        # text arrive as the same kind of block on the same UserMessage.
+        if "<system-reminder>" not in block.text:
+            return None
+
+        for mode, announcement in MODE_ANNOUNCEMENTS.items():
+            if announcement in block.text:
+                return mode
+
+        return None
+
+    if isinstance(block, ToolResultMessageContent) and not block.is_error:
+        text = (
+            block.content
+            if isinstance(block.content, str)
+            else "\n".join(item.text for item in block.content)
+        )
+
+        if PLAN_ACCEPTED_TO_BUILD in text:
+            return AgentMode.BUILD
+
+    return None
+
+
+def last_notified_mode(messages: Sequence[Message]) -> AgentMode | None:
+    """The mode the transcript most recently told the model about.
+
+    `notified_mode` is a fact about the conversation, not about the process
+    that happened to host it, so a resumed session reads it back out of the
+    transcript instead of starting from None. Starting from None is what used
+    to repeat the mode reminder on the first prompt after a resume.
+
+    Only announcements count, because only they leave a trace. A mode switch
+    the model was never told about — `/plan` typed with the session closed
+    before the next prompt — is not recoverable, and such a session resumes in
+    BUILD.
+    """
+    for message in reversed(messages):
+        if not isinstance(message, UserMessage) or not isinstance(message.content, list):
+            continue
+
+        for block in reversed(message.content):
+            mode = _announced_mode(block)
+            if mode is not None:
+                return mode
+
+    return None
+
+
+def restore_policy(messages: Sequence[Message]) -> AgentPolicy:
+    """Rebuilds the policy of a resumed session from its transcript.
+
+    The mode is restored alongside the notification state: a user who left a
+    session in PLAN mode deliberately withheld write and shell access, and
+    resuming is not the moment to hand it back.
+    """
+    notified = last_notified_mode(messages)
+
+    return AgentPolicy(mode=notified or AgentMode.BUILD, notified_mode=notified)

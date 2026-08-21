@@ -19,7 +19,13 @@ from typedefs import (
 )
 
 from config import AppConfig
-from hooks import PreToolUseEvent, PostToolUseEvent, UserPromptEvent
+from hooks import (
+    MODE_ANNOUNCEMENTS,
+    PreToolUseEvent,
+    PostToolUseEvent,
+    UserPromptEvent,
+    mode_reminder,
+)
 from agent import run_agentic_loop
 from agent import execute_tool, handle_shell, handle_subagent, main, run_repl
 from sessioncontext import AgentPolicy, AgentMode, InvocationContext
@@ -33,6 +39,20 @@ class StubREPLUI(NullUI):
     so the existing @patch('builtins.input') plumbing keeps driving main()."""
     async def read_user_input(self) -> str:
         return input()
+
+
+class RecordingREPLUI(StubREPLUI):
+    """StubREPLUI that also keeps the session banner it was handed.
+
+    main() builds its own front-end, so a class-level record is the only way
+    back to the SessionInfo it assembled -- which is where the starting mode
+    becomes observable.
+    """
+
+    sessions_started: list[SessionInfo] = []
+
+    async def session_start(self, info: SessionInfo) -> None:
+        type(self).sessions_started.append(info)
 
 
 class RecordingUI(NullUI):
@@ -1714,7 +1734,8 @@ class TestSessionStartup(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.home_patcher.stop)
         self.addCleanup(self.home_dir.cleanup)
 
-        self.ui_patcher = patch("ui.rich_ui.RichUI", StubREPLUI)
+        RecordingREPLUI.sessions_started = []
+        self.ui_patcher = patch("ui.rich_ui.RichUI", RecordingREPLUI)
         self.ui_patcher.start()
         self.addCleanup(self.ui_patcher.stop)
 
@@ -1729,23 +1750,47 @@ class TestSessionStartup(unittest.IsolatedAsyncioTestCase):
         *extra: str,
         inputs: list[str] | None = None,
         stderr: io.StringIO | None = None,
-    ):
+        messages: list | None = None,
+    ) -> MockTranscriptState:
         """Runs main() end to end against the fake home.
 
         `stderr` collects what a failed resolution reports; capturing it means
         leaving `print` alone, which is otherwise patched only to keep the test
         output quiet.
+
+        `messages` seeds the transcript main() loads, which is how a resumed
+        conversation is simulated: the mode and setup hooks both decide what to
+        inject by reading it. The transcript is returned so a test can see what
+        the run appended to it.
         """
         quiet = nullcontext() if stderr else patch("builtins.print")
         errors = redirect_stderr(stderr) if stderr else nullcontext()
+
+        transcript = MockTranscriptState(Path("/mock/main.jsonl"))
+        transcript.messages.extend(messages or ())
 
         with patch.object(sys, "argv", self.argv(*extra)), \
              patch("agent.run_agentic_loop", new_callable=AsyncMock), \
              patch("agent.Transcript") as transcript_cls, \
              patch("builtins.input", side_effect=inputs or ["/quit"]), \
              quiet, errors:
-            transcript_cls.return_value = MockTranscriptState(Path("/mock/main.jsonl"))
+            transcript_cls.return_value = transcript
             await main()
+
+        return transcript
+
+    @property
+    def started(self) -> SessionInfo:
+        """The banner main() handed the front-end."""
+        self.assertEqual(len(RecordingREPLUI.sessions_started), 1)
+        return RecordingREPLUI.sessions_started[0]
+
+    def announcing(self, mode: AgentMode) -> UserMessage:
+        """A prior turn of a conversation that was told it is in `mode`."""
+        return UserMessage(content=[
+            TextMessageContent(text=mode_reminder(mode)),
+            TextMessageContent(text="the previous question"),
+        ])
 
     def seed_session(self, session_id: str) -> sessions.SessionPaths:
         paths = sessions.session_for(self.app_config, self.workspace, session_id)
@@ -1849,6 +1894,57 @@ class TestSessionStartup(unittest.IsolatedAsyncioTestCase):
         transcripts = list(self.fake_home.glob("projects/*/sessions/*"))
         self.assertEqual(len(transcripts), 1)
         self.assertFalse(transcripts[0].is_relative_to(self.workspace))
+
+    async def test_resuming_does_not_repeat_the_mode_reminder(self):
+        """The reminder announces a transition, and a resume is not one.
+
+        The seeded transcript already carries the BUILD announcement, so the
+        prompt this run sends must carry nothing but the prompt.
+        """
+        paths = self.seed_session("2026-08-19_16-25-03-a1b2c3")
+        seeded = [self.announcing(AgentMode.BUILD)]
+
+        with patch("agent.rehydrate_session_usage") as rehydrate:
+            rehydrate.return_value = SessionUsageTracker()
+            transcript = await self.run_main(
+                "--resume", paths.session_id,
+                inputs=["the next question", "/quit"],
+                messages=seeded,
+            )
+
+        appended = transcript.messages[len(seeded):]
+        self.assertEqual(len(appended), 1)
+        self.assertEqual(
+            [block.text for block in appended[0].content], ["the next question"]
+        )
+
+    async def test_resuming_a_plan_session_stays_in_plan_mode(self):
+        """PLAN mode is a restriction the user chose, so resuming keeps it
+        rather than quietly handing write and shell access back."""
+        paths = self.seed_session("2026-08-19_16-25-03-a1b2c3")
+
+        with patch("agent.rehydrate_session_usage") as rehydrate:
+            rehydrate.return_value = SessionUsageTracker()
+            await self.run_main(
+                "--resume", paths.session_id,
+                messages=[self.announcing(AgentMode.PLAN)],
+            )
+
+        self.assertEqual(self.started.mode, "PLAN")
+
+    async def test_a_fresh_run_starts_in_build_mode_and_announces_it(self):
+        """The control for the two tests above: a new conversation has been
+        told nothing yet, so it is told once."""
+        transcript = await self.run_main(inputs=["the first question", "/quit"])
+
+        self.assertEqual(self.started.mode, "BUILD")
+
+        prompts = [m for m in transcript.messages if isinstance(m, UserMessage)]
+        self.assertEqual(len(prompts), 1)
+        self.assertIn(
+            MODE_ANNOUNCEMENTS[AgentMode.BUILD],
+            "\n".join(block.text for block in prompts[0].content),
+        )
 
 
 if __name__ == "__main__":

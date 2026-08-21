@@ -24,9 +24,11 @@ from dotenv import load_dotenv
 from transcript import Transcript
 from hooks import (
     HookManager,
+    PLAN_ACCEPTED_TO_BUILD,
     agent_mode_hook,
     capabilities_hook,
     initial_setup_hook,
+    restore_policy,
     shell_confirmation_hook,
 )
 from filestate import file_changes_hook
@@ -321,7 +323,7 @@ async def execute_tool(
             if decision.choice == "build":
                 policy.mode = AgentMode.BUILD
                 policy.notified_mode = AgentMode.BUILD # Prevent the hook from double-firing
-                result_output = "SUCCESS: User accepted the plan and switched to BUILD mode. You now have access to write tools. Proceed with execution."
+                result_output = PLAN_ACCEPTED_TO_BUILD
                 is_error = False
                 ui_summary = "Plan accepted - switched to BUILD mode"
 
@@ -766,9 +768,17 @@ async def main():
     registry = create_core_registry(ctx)
     hooks = HookManager()
 
-    # Agent policy
-    policy = AgentPolicy()
-    policy.mode = AgentMode.BUILD
+    # Load (or create) the main transcript
+    transcript = Transcript(transcript_file)
+
+    # Agent policy. A resumed conversation has already been told which mode it
+    # is in, so the policy is read back out of the transcript rather than
+    # started over: a blank one repeats the mode reminder on the first prompt,
+    # and drops a session the user left in PLAN mode back into BUILD.
+    policy = (
+        restore_policy(transcript.messages) if resuming
+        else AgentPolicy(mode=AgentMode.BUILD)
+    )
     
     # Bind and register the built-in hooks
     bound_setup_hook = partial(initial_setup_hook, app_config=app_config, root=root_dir, cwd=cwd)
@@ -789,9 +799,6 @@ async def main():
 
     # Safety gate: every Shell command requires explicit user confirmation
     hooks.register_pre_tool(partial(shell_confirmation_hook, ui=ui))
-    
-    # Load (or create) the main transcript
-    transcript = Transcript(transcript_file)
 
     # System Prompt injection (only if transcript is brand new)
     if len(transcript.messages) == 0:
